@@ -11,9 +11,9 @@ spec:
   # 项目默认不允许任何源仓库,必须显式列出
   sourceRepos:
     - https://github.com/xiaobaowan1988/argocd-example-apps.git
-  # 只允许部署到本集群的 dev-env-* 命名空间
+  # 只允许部署到本集群的 dev*-env-* 命名空间(dev、dev1…dev12 等所有开发环境)
   destinations:
-    - namespace: 'dev-env-*'
+    - namespace: 'dev*-env-*'
       server: https://kubernetes.default.svc
   # 集群级资源只放行 Namespace(CreateNamespace=true 需要),其余默认禁止
   clusterResourceWhitelist:

@@ -1,6 +1,7 @@
-# 演示:一个 ApplicationSet 按目录批量生成 Application。
-# 生成的 Application 与 ApplicationSet 在同一命名空间,所以每个环境一个 ApplicationSet,
-# 放在各自的配置命名空间(Apps in Any Namespace),并绑定该环境的 AppProject。
+# 演示:一个 ApplicationSet 管理所有开发环境(同一集群的不同命名空间,环境间不需要隔离)。
+# 部署标记 demo/<应用>/envs/<环境>.yaml:文件存在 = 该应用部署到该环境,环境名取自文件名(如 dev3)。
+# 新增环境不用改这里,只要有应用放 envs/devN.yaml;删除文件即从该环境下线。
+# 生成的 Application 与 ApplicationSet 在同一命名空间(argocd-apps-dev),名字是 <应用>-<环境>。
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -13,13 +14,14 @@ spec:
     - git:
         repoURL: https://github.com/xiaobaowan1988/argocd-example-apps.git
         revision: HEAD
-        # 只有存在 envs/dev.yaml 的应用才会部署到 dev(删文件即下线)
-        # 注意:files 生成器的 path.path 是标记文件所在目录(demo/<应用>/envs),应用目录要取上一级
+        # files 生成器的 path.path 是标记文件所在目录(demo/<应用>/envs),应用目录要取上一级
+        # 只匹配 dev*.yaml,test.yaml 由 test 的 ApplicationSet 处理
         files:
-          - path: demo/*/envs/dev.yaml
+          - path: demo/*/envs/dev*.yaml
   template:
     metadata:
-      name: '{{ base (dir .path.path) }}-dev'
+      # 例: app-a-dev3
+      name: '{{ base (dir .path.path) }}-{{ trimSuffix ".yaml" .path.filename }}'
       # 删除 Application 时级联删除它部署的资源
       finalizers:
         - resources-finalizer.argocd.argoproj.io
@@ -31,7 +33,8 @@ spec:
         path: '{{ dir .path.path }}'
       destination:
         server: https://kubernetes.default.svc
-        namespace: 'dev-env-{{ base (dir .path.path) }}'
+        # 例: dev3-env-app-a(匹配 project-dev 的 dev*-env-*)
+        namespace: '{{ trimSuffix ".yaml" .path.filename }}-env-{{ base (dir .path.path) }}'
       syncPolicy:
         automated:
           prune: true

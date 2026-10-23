@@ -24,9 +24,9 @@ manifests/
 ├── argocd/base/               官方 install.yaml(v3.5.6)+ 开启 Apps in Any Namespace
 ├── argocd/overlays/sandbox/   沙箱专用:repo-server 信任出口网关 CA
 ├── apps/common/               两个环境共用的仓库登记 Secret
-├── apps/dev/                  argocd-apps-dev、project-dev(只能发往 dev-env-*)、frontend
+├── apps/dev/                  argocd-apps-dev、project-dev(只能发往 dev*-env-*,即 dev、dev1…devN)、frontend
 ├── apps/test/                 argocd-apps-test、project-test(只能发往 test-env-*)、frontend
-└── appsets/{dev,test}/        演示:每个环境一个 ApplicationSet,按目录批量生成 Application
+└── appsets/{dev,test}/        演示:dev 一个 ApplicationSet 管所有开发环境(dev1…dev12);test 独立一个
 ```
 ```bash
 ./scripts/install-argocd.sh     # 检测到 /root/.ccr/ca-bundle.crt 时自动用 sandbox overlay
@@ -54,13 +54,27 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:
   所以下线应用时 Application 和它部署的资源会级联删除,但**命名空间保留**(空的),需要时手动删除。
   这样即使别的东西也放在同一命名空间里,也不会被误删。
   (曾试过把 Namespace 清单放进应用目录让它随应用删除,但会连命名空间里所有内容一起删,已放弃。)
-- **按环境选择性部署**:应用目录下的 `envs/<env>.yaml` 是部署标记。dev 的 ApplicationSet 用
-  `files: demo/*/envs/dev.yaml`,test 用 `demo/*/envs/test.yaml`,有标记文件才会部署到该环境,
-  删文件即从该环境下线(Application 和资源被清理,命名空间保留)。例如 `app-b` 只有 `envs/dev.yaml`,
-  就只在 dev 调试。files 生成器的 `path.path` 是标记文件所在目录(`demo/<应用>/envs`),
-  模板里用 `{{ dir .path.path }}` / `{{ base (dir .path.path) }}` 取应用目录和名字。
-  已验证:`app-b` 仅在 dev;给它加 `envs/test.yaml` → `app-b-test` 和 `test-env-app-b` 出现;
-  删除后 `app-b-test` 和 ConfigMap 消失,命名空间保留。标记文件里还可以放该环境的参数,模板用 `{{.参数名}}` 取值。
+- **按环境选择性部署(开发环境有十几个,同一集群,环境间不需要隔离)**:应用目录下的
+  `envs/<环境>.yaml` 是部署标记,**环境名取自文件名**(`dev3.yaml` → 环境 dev3)。dev 只有**一个**
+  ApplicationSet,`files: demo/*/envs/dev*.yaml` 一次扫描所有开发环境;Application 名 `<应用>-<环境>`
+  (如 `app-c-dev3`),目标命名空间 `<环境>-env-<应用>`(如 `dev3-env-app-c`),全部绑定同一个
+  `project-dev`。新增环境不用改任何清单,只要有应用放 `envs/devN.yaml`;test 的标记是 `envs/test.yaml`,
+  由 test 自己的 ApplicationSet 处理(`dev*.yaml` 不会匹配它)。
+  标记文件的管理用 fork 里的 `tools/envs.sh`:
+  ```bash
+  tools/envs.sh enable app-a dev{1..12}   # 批量启用到 12 个环境
+  tools/envs.sh enable app-c dev3         # 只在 dev3 调试
+  tools/envs.sh enable app-c dev5 dev7    # 推广
+  tools/envs.sh disable app-c dev3        # 从 dev3 移除(= 迁移到 dev5、dev7)
+  tools/envs.sh list                      # 查看各应用部署在哪些环境
+  ```
+  下线(删标记文件)时 Application 和资源被清理,命名空间保留。
+  已验证:`app-c` 只在 dev3 → 加 dev5、dev7 → 删 dev3,三步 Application 均如预期出现/消失,
+  `app-a` 的 12 个不受影响。注意:所有开发环境的 Application 都在 `argocd-apps-dev` 一个命名空间里,
+  没有按环境隔离(本场景不需要);要隔离得回到"每个环境一个 ApplicationSet"。
+  files 生成器的 `path.path` 是标记文件所在目录(`demo/<应用>/envs`),
+  模板里用 `{{ dir .path.path }}` / `{{ base (dir .path.path) }}` / `{{ trimSuffix ".yaml" .path.filename }}`
+  取应用目录、应用名和环境名。标记文件里还可以放该环境的参数,模板用 `{{.参数名}}` 取值(未验证)。
 - 机器重启后进程不会自动恢复(无 systemd),运行 `./scripts/restart-cluster.sh` 即可,数据不丢。
 - 早先的验证:往 `demo/` 加 `app-d` → dev/test 各自动出现 Application 和命名空间;删目录 → 全部消失。
   `frontend`(手写 Application)仍用 `CreateNamespace=true`,不受影响。
