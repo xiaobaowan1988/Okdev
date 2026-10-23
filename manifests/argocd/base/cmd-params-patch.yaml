@@ -1,0 +1,7 @@
+# 开启 "Apps in Any Namespace":允许 argocd 和 argocd-apps-* 命名空间里的 Application
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+data:
+  application.namespaces: "argocd, argocd-apps-*"

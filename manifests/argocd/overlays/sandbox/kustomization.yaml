@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+# ca-bundle.crt 由 scripts/install-argocd.sh 从 /root/.ccr/ca-bundle.crt 复制,不入库
+configMapGenerator:
+  - name: sandbox-ca
+    namespace: argocd
+    files:
+      - ca-bundle.crt
+generatorOptions:
+  disableNameSuffixHash: true
+patches:
+  - path: repo-server-patch.yaml

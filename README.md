@@ -18,15 +18,29 @@ kubectl get pods -A
 
 在有 systemd、cgroup v2 的正常主机上不需要后三项处理。
 
-## Argo CD
+## Argo CD(kustomize 清单)
+```
+manifests/
+├── argocd/base/               官方 install.yaml(v3.5.6)+ 开启 Apps in Any Namespace
+├── argocd/overlays/sandbox/   沙箱专用:repo-server 信任出口网关 CA
+└── apps/dev/                  argocd-apps-dev 命名空间、AppProject、仓库登记、Application
+```
 ```bash
-./scripts/install-argocd.sh
+./scripts/install-argocd.sh     # 检测到 /root/.ccr/ca-bundle.crt 时自动用 sandbox overlay
+./scripts/deploy-apps.sh dev    # 部署 AppProject + Application
+kubectl get app -n argocd-apps-dev
 kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:8080, 用户 admin
 ```
 `argocd-server` 保持 ClusterIP,通过 port-forward 访问。
 
-注意:镜像在共享出口 IP 下可能被 Docker Hub / public.ecr.aws 限流(429),
-出现 ImagePullBackOff 时手动 `crictl pull <镜像>` 后删除对应 Pod 即可。
+要点:
+- AppProject 默认不允许任何源仓库,必须写 `sourceRepos`;集群级资源只白名单放行 `Namespace`
+  (`CreateNamespace=true` 需要),其余默认禁止。
+- 沙箱里 Pod 访问 GitHub 经过出口网关 CA(与宿主机代理 CA 不同),所以把 CA bundle 覆盖挂载为
+  repo-server 的系统信任库。**不要**往 `argocd-tls-certs-cm` 放 `github.com` 条目,否则 Argo CD
+  对该主机只认那里的证书,仍会报 `unknown authority`。`ca-bundle.crt` 由脚本复制,已 gitignore。
+- 镜像在共享出口 IP 下可能被 Docker Hub / public.ecr.aws 限流(429),
+  出现 ImagePullBackOff 时手动 `crictl pull <镜像>` 后删除对应 Pod 即可。
 
 ## Kustomize
 ```bash
