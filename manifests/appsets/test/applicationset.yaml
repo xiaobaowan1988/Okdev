@@ -21,6 +21,9 @@ spec:
   template:
     metadata:
       name: '{{.path.basename}}-test'
+      # 删除 Application 时级联删除它部署的资源
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
     spec:
       project: project-test
       source:
