@@ -14,11 +14,13 @@ spec:
     - git:
         repoURL: https://github.com/xiaobaowan1988/argocd-example-apps.git
         revision: HEAD
-        directories:
-          - path: demo/*
+        # 只有存在 envs/test.yaml 的应用才会部署到 test(删文件即下线)
+        # 注意:files 生成器的 path.path 是标记文件所在目录(demo/<应用>/envs),应用目录要取上一级
+        files:
+          - path: demo/*/envs/test.yaml
   template:
     metadata:
-      name: '{{.path.basename}}-test'
+      name: '{{ base (dir .path.path) }}-test'
       # 删除 Application 时级联删除它部署的资源
       finalizers:
         - resources-finalizer.argocd.argoproj.io
@@ -27,13 +29,13 @@ spec:
       source:
         repoURL: https://github.com/xiaobaowan1988/argocd-example-apps.git
         targetRevision: HEAD
-        path: '{{.path.path}}'
+        path: '{{ dir .path.path }}'
         kustomize:
           # 把目录里 namespace.yaml 的占位名改成实际命名空间
-          namespace: 'test-env-{{.path.basename}}'
+          namespace: 'test-env-{{ base (dir .path.path) }}'
       destination:
         server: https://kubernetes.default.svc
-        namespace: 'test-env-{{.path.basename}}'
+        namespace: 'test-env-{{ base (dir .path.path) }}'
       syncPolicy:
         automated:
           prune: true

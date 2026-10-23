@@ -54,7 +54,15 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:
   namespace 转换会连 Namespace 资源一起改名),并且去掉了 `CreateNamespace=true`,
   所以 Namespace 是 Application 管理的资源,配合 `resources-finalizer.argocd.argoproj.io`,
   删除应用目录时 Application、资源、命名空间会一起清理。
-  已验证:往 `demo/` 加 `app-d` → dev/test 各自动出现 Application 和命名空间;删目录 → 全部消失。
+- **按环境选择性部署**:应用目录下的 `envs/<env>.yaml` 是部署标记。dev 的 ApplicationSet 用
+  `files: demo/*/envs/dev.yaml`,test 用 `demo/*/envs/test.yaml`,有标记文件才会部署到该环境,
+  删文件即从该环境下线(Application、资源、命名空间一并清理)。例如 `app-b` 只有 `envs/dev.yaml`,
+  就只在 dev 调试。files 生成器的 `path.path` 是标记文件所在目录(`demo/<应用>/envs`),
+  模板里用 `{{ dir .path.path }}` / `{{ base (dir .path.path) }}` 取应用目录和名字。
+  已验证:`app-b` 仅在 dev;给它加 `envs/test.yaml` → `app-b-test` 和 `test-env-app-b` 出现;
+  删除后消失。标记文件里还可以放该环境的参数,模板用 `{{.参数名}}` 取值。
+- 机器重启后进程不会自动恢复(无 systemd),运行 `./scripts/restart-cluster.sh` 即可,数据不丢。
+- 早先的验证:往 `demo/` 加 `app-d` → dev/test 各自动出现 Application 和命名空间;删目录 → 全部消失。
   `frontend`(手写 Application)仍用 `CreateNamespace=true`,不受影响。
   ApplicationSet 默认每 3 分钟轮询一次,可用 `argocd.argoproj.io/application-set-refresh=true` 注解立即刷新。
 - 规模化:往生成器的 `directories` 加路径(或让仓库目录约定自动被 `apps/*` 之类的通配匹配),
