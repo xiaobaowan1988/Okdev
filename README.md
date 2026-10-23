@@ -48,11 +48,14 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:
   `argocd-apps-<env>` 里,绑定 `project-<env>`。要让 ApplicationSet 跨命名空间,需要
   `applicationsetcontroller.namespaces`,并关闭 SCM provider 生成器(或配置 allowed.scm.providers),
   否则控制器启动失败。
-- 仓库地址指向 fork `xiaobaowan1988/argocd-example-apps`(`HEAD` = master)。
-  已验证:往 fork 加 `lightweight/app-c` 目录 → dev/test 各自动出现一个 Application 并同步;
-  删目录 → Application 自动消失。模板带了 `resources-finalizer.argocd.argoproj.io`,所以 Application
-  部署的资源会一并级联删除(已验证);但 `CreateNamespace=true` 创建的业务命名空间不归 Application
-  管理,会残留为空命名空间,需要时手动删除(或另行用 Namespace 资源纳入管理)。
+- 仓库地址指向 fork `xiaobaowan1988/argocd-example-apps`(`HEAD` = master)。ApplicationSet 扫描
+  `demo/*`,每个子目录是一个 kustomize 应用,**自带 `namespace.yaml`**(占位名 `placeholder`)。
+  模板通过 `source.kustomize.namespace: <env>-env-<应用名>` 把它改成实际命名空间(kustomize 的
+  namespace 转换会连 Namespace 资源一起改名),并且去掉了 `CreateNamespace=true`,
+  所以 Namespace 是 Application 管理的资源,配合 `resources-finalizer.argocd.argoproj.io`,
+  删除应用目录时 Application、资源、命名空间会一起清理。
+  已验证:往 `demo/` 加 `app-d` → dev/test 各自动出现 Application 和命名空间;删目录 → 全部消失。
+  `frontend`(手写 Application)仍用 `CreateNamespace=true`,不受影响。
   ApplicationSet 默认每 3 分钟轮询一次,可用 `argocd.argoproj.io/application-set-refresh=true` 注解立即刷新。
 - 规模化:往生成器的 `directories` 加路径(或让仓库目录约定自动被 `apps/*` 之类的通配匹配),
   就会多出对应 Application;删目录则自动清理。

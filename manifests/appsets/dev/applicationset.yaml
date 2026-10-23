@@ -1,5 +1,6 @@
 # 演示:一个 ApplicationSet 按目录批量生成 Application。
 # 生成的 Application 与 ApplicationSet 在同一命名空间,所以每个环境一个 ApplicationSet,
+# Namespace 由应用目录里的 namespace.yaml 提供(随 Application 一起创建/删除)。
 # 放在各自的配置命名空间(Apps in Any Namespace),并绑定该环境的 AppProject。
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
@@ -14,10 +15,7 @@ spec:
         repoURL: https://github.com/xiaobaowan1988/argocd-example-apps.git
         revision: HEAD
         directories:
-          - path: guestbook
-          - path: helm-guestbook
-          - path: kustomize-guestbook
-          - path: lightweight/*
+          - path: demo/*
   template:
     metadata:
       name: '{{.path.basename}}-dev'
@@ -30,6 +28,9 @@ spec:
         repoURL: https://github.com/xiaobaowan1988/argocd-example-apps.git
         targetRevision: HEAD
         path: '{{.path.path}}'
+        kustomize:
+          # 把目录里 namespace.yaml 的占位名改成实际命名空间
+          namespace: 'dev-env-{{.path.basename}}'
       destination:
         server: https://kubernetes.default.svc
         namespace: 'dev-env-{{.path.basename}}'
@@ -37,5 +38,3 @@ spec:
         automated:
           prune: true
           selfHeal: true
-        syncOptions:
-          - CreateNamespace=true
