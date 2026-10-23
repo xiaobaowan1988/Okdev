@@ -17,3 +17,13 @@ kubectl get pods -A
 - **误报 disk-pressure**:kubelet 读不到 imagefs 容量,安装脚本把驱逐阈值调为 0。
 
 在有 systemd、cgroup v2 的正常主机上不需要后三项处理。
+
+## Argo CD
+```bash
+./scripts/install-argocd.sh
+kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:8080, 用户 admin
+```
+`argocd-server` 保持 ClusterIP,通过 port-forward 访问。
+
+注意:镜像在共享出口 IP 下可能被 Docker Hub / public.ecr.aws 限流(429),
+出现 ImagePullBackOff 时手动 `crictl pull <镜像>` 后删除对应 Pod 即可。
