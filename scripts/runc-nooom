@@ -1,0 +1,12 @@
+#!/bin/bash
+# runc wrapper: drop process.oomScoreAdj (sandbox lacks CAP_SYS_RESOURCE)
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--bundle" ] || [ "$prev" = "-b" ]; then B="$a"; fi
+  case "$a" in --bundle=*) B="${a#--bundle=}";; esac
+  prev="$a"
+done
+if [[ " $* " == *" create "* ]] && [ -n "$B" ] && [ -f "$B/config.json" ]; then
+  jq 'del(.process.oomScoreAdj)' "$B/config.json" > "$B/config.json.tmp" && mv "$B/config.json.tmp" "$B/config.json"
+fi
+exec /usr/bin/runc "$@"
