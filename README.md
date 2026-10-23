@@ -49,18 +49,18 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:
   `applicationsetcontroller.namespaces`,并关闭 SCM provider 生成器(或配置 allowed.scm.providers),
   否则控制器启动失败。
 - 仓库地址指向 fork `xiaobaowan1988/argocd-example-apps`(`HEAD` = master)。ApplicationSet 扫描
-  `demo/*`,每个子目录是一个 kustomize 应用,**自带 `namespace.yaml`**(占位名 `placeholder`)。
-  模板通过 `source.kustomize.namespace: <env>-env-<应用名>` 把它改成实际命名空间(kustomize 的
-  namespace 转换会连 Namespace 资源一起改名),并且去掉了 `CreateNamespace=true`,
-  所以 Namespace 是 Application 管理的资源,配合 `resources-finalizer.argocd.argoproj.io`,
-  删除应用目录时 Application、资源、命名空间会一起清理。
+  `demo/*/envs/<env>.yaml`,每个应用目录是一个 kustomize 应用。命名空间由模板里的
+  `CreateNamespace=true` 创建,**不属于应用管理**;模板带 `resources-finalizer.argocd.argoproj.io`,
+  所以下线应用时 Application 和它部署的资源会级联删除,但**命名空间保留**(空的),需要时手动删除。
+  这样即使别的东西也放在同一命名空间里,也不会被误删。
+  (曾试过把 Namespace 清单放进应用目录让它随应用删除,但会连命名空间里所有内容一起删,已放弃。)
 - **按环境选择性部署**:应用目录下的 `envs/<env>.yaml` 是部署标记。dev 的 ApplicationSet 用
   `files: demo/*/envs/dev.yaml`,test 用 `demo/*/envs/test.yaml`,有标记文件才会部署到该环境,
-  删文件即从该环境下线(Application、资源、命名空间一并清理)。例如 `app-b` 只有 `envs/dev.yaml`,
+  删文件即从该环境下线(Application 和资源被清理,命名空间保留)。例如 `app-b` 只有 `envs/dev.yaml`,
   就只在 dev 调试。files 生成器的 `path.path` 是标记文件所在目录(`demo/<应用>/envs`),
   模板里用 `{{ dir .path.path }}` / `{{ base (dir .path.path) }}` 取应用目录和名字。
   已验证:`app-b` 仅在 dev;给它加 `envs/test.yaml` → `app-b-test` 和 `test-env-app-b` 出现;
-  删除后消失。标记文件里还可以放该环境的参数,模板用 `{{.参数名}}` 取值。
+  删除后 `app-b-test` 和 ConfigMap 消失,命名空间保留。标记文件里还可以放该环境的参数,模板用 `{{.参数名}}` 取值。
 - 机器重启后进程不会自动恢复(无 systemd),运行 `./scripts/restart-cluster.sh` 即可,数据不丢。
 - 早先的验证:往 `demo/` 加 `app-d` → dev/test 各自动出现 Application 和命名空间;删目录 → 全部消失。
   `frontend`(手写 Application)仍用 `CreateNamespace=true`,不受影响。
