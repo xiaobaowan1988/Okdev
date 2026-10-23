@@ -1,0 +1,5 @@
+# 存放 Application 的配置命名空间(与业务命名空间 test-env-* 分开)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd-apps-test

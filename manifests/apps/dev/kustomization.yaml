@@ -3,5 +3,4 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - appproject.yaml
-  - repo.yaml
   - application.yaml

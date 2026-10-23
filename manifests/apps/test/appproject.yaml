@@ -1,0 +1,21 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: project-test
+  namespace: argocd
+spec:
+  description: Test Environment Project
+  # 只允许 argocd-apps-test 命名空间里的 Application 绑定到此项目
+  sourceNamespaces:
+    - argocd-apps-test
+  # 项目默认不允许任何源仓库,必须显式列出
+  sourceRepos:
+    - https://github.com/argoproj/argocd-example-apps.git
+  # 只允许部署到本集群的 test-env-* 命名空间
+  destinations:
+    - namespace: 'test-env-*'
+      server: https://kubernetes.default.svc
+  # 集群级资源只放行 Namespace(CreateNamespace=true 需要),其余默认禁止
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
