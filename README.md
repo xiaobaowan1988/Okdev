@@ -48,6 +48,11 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:
   `argocd-apps-<env>` 里,绑定 `project-<env>`。要让 ApplicationSet 跨命名空间,需要
   `applicationsetcontroller.namespaces`,并关闭 SCM provider 生成器(或配置 allowed.scm.providers),
   否则控制器启动失败。
+- 仓库地址指向 fork `xiaobaowan1988/argocd-example-apps`(`HEAD` = master)。
+  已验证:往 fork 加 `lightweight/app-c` 目录 → dev/test 各自动出现一个 Application 并同步;
+  删目录 → Application 自动消失。注意:删除的只是 Application,业务命名空间和资源会残留
+  (模板里没有 `resources-finalizer.argocd.argoproj.io`),需要级联清理的话在模板 metadata 里加上它。
+  ApplicationSet 默认每 3 分钟轮询一次,可用 `argocd.argoproj.io/application-set-refresh=true` 注解立即刷新。
 - 规模化:往生成器的 `directories` 加路径(或让仓库目录约定自动被 `apps/*` 之类的通配匹配),
   就会多出对应 Application;删目录则自动清理。
 - 镜像在共享出口 IP 下可能被 Docker Hub / public.ecr.aws 限流(429),

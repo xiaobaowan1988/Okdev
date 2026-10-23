@@ -10,7 +10,7 @@ spec:
     - argocd-apps-dev
   # 项目默认不允许任何源仓库,必须显式列出
   sourceRepos:
-    - https://github.com/argoproj/argocd-example-apps.git
+    - https://github.com/xiaobaowan1988/argocd-example-apps.git
   # 只允许部署到本集群的 dev-env-* 命名空间
   destinations:
     - namespace: 'dev-env-*'
