@@ -25,12 +25,14 @@ manifests/
 ├── argocd/overlays/sandbox/   沙箱专用:repo-server 信任出口网关 CA
 ├── apps/common/               两个环境共用的仓库登记 Secret
 ├── apps/dev/                  argocd-apps-dev、project-dev(只能发往 dev-env-*)、frontend
-└── apps/test/                 argocd-apps-test、project-test(只能发往 test-env-*)、frontend
+├── apps/test/                 argocd-apps-test、project-test(只能发往 test-env-*)、frontend
+└── appsets/{dev,test}/        演示:每个环境一个 ApplicationSet,按目录批量生成 Application
 ```
 ```bash
 ./scripts/install-argocd.sh     # 检测到 /root/.ccr/ca-bundle.crt 时自动用 sandbox overlay
 ./scripts/deploy-apps.sh dev    # 或 test:部署共享仓库登记 + 该环境的 AppProject + Application
-kubectl get app -A
+./scripts/deploy-appsets.sh     # 演示 ApplicationSet:每个环境生成 5 个 Application
+kubectl get appset,app -A
 kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:8080, 用户 admin
 ```
 `argocd-server` 保持 ClusterIP,通过 port-forward 访问。
@@ -41,6 +43,13 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:
 - 沙箱里 Pod 访问 GitHub 经过出口网关 CA(与宿主机代理 CA 不同),所以把 CA bundle 覆盖挂载为
   repo-server 的系统信任库。**不要**往 `argocd-tls-certs-cm` 放 `github.com` 条目,否则 Argo CD
   对该主机只认那里的证书,仍会报 `unknown authority`。`ca-bundle.crt` 由脚本复制,已 gitignore。
+- **ApplicationSet 生成的 Application 与 ApplicationSet 在同一命名空间**,`template.metadata.namespace`
+  不会改变落点(会静默落到 ApplicationSet 所在命名空间)。所以每个环境一个 ApplicationSet,放在
+  `argocd-apps-<env>` 里,绑定 `project-<env>`。要让 ApplicationSet 跨命名空间,需要
+  `applicationsetcontroller.namespaces`,并关闭 SCM provider 生成器(或配置 allowed.scm.providers),
+  否则控制器启动失败。
+- 规模化:往生成器的 `directories` 加路径(或让仓库目录约定自动被 `apps/*` 之类的通配匹配),
+  就会多出对应 Application;删目录则自动清理。
 - 镜像在共享出口 IP 下可能被 Docker Hub / public.ecr.aws 限流(429),
   出现 ImagePullBackOff 时手动 `crictl pull <镜像>` 后删除对应 Pod 即可。
 
