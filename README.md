@@ -27,3 +27,8 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:
 
 注意:镜像在共享出口 IP 下可能被 Docker Hub / public.ecr.aws 限流(429),
 出现 ImagePullBackOff 时手动 `crictl pull <镜像>` 后删除对应 Pod 即可。
+
+## Kustomize
+```bash
+./scripts/install-kustomize.sh              # 默认 v5.8.1,可用 KUSTOMIZE_VERSION 覆盖
+```
