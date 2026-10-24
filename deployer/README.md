@@ -125,6 +125,39 @@ curl -X POST $A/v1/runs/1/cancel   # 取消
   **修复后的实测**:同时提交 3 次,每次都是同一时刻只有 1 个构建 Job,后提交的显示 `queued: waiting for run N`,两个依次 `succeeded`(间隔约 5 秒,即前一个结束后下一个才开始),最终环境里是编号更大的、部署历史顺序与提交顺序一致;
   不同环境同时提交仍然并行(2 个 Job 同时构建);取消排在前面的运行后排队的接着开始;前面的运行失败后排队的不会被卡住;排队中途重启 deployer,队列仍然正确(它是从数据库推导的)。
   代价:同一环境同一服务的连续运行变慢(依次各约 50 秒);排在前面的运行如果卡住(构建最长 15 分钟、部署最长 10 分钟),后面的都得等它超时或被取消。
+## Java 服务:先打 jar,再构建镜像
+**支持,方式是多阶段 Dockerfile**:第一阶段用 JDK/Maven 把源码打成 jar,第二阶段只把 jar 拷进 JRE 镜像。builder 照常指向这个 Dockerfile,不需要任何代码改动。
+**不是**流水线里一个独立的"构建 jar"步骤——流水线的步骤目前只有 `build` 和 `deploy`,jar 是在 `build`(kaniko 构建镜像)里面的第一个阶段打出来的,没有单独的产物、也没有单独的状态。
+
+fork 里有两个可运行的示例(都实测过,服务是 `java-api`,清单在 `demo/java-api`):
+
+| 示例 | 打 jar 的方式 | 需要外网 | 实测 |
+|---|---|---|---|
+| `src/java-plain` | `javac` + `jar`(JDK 自带) | 否 | build-and-deploy 到 dev3,约 75 秒;响应 `{"version":"r37","java":"21.0.12.1"}` |
+| `src/java-maven` | `mvn package`(`maven-jar-plugin`) | 是(Maven Central) | 见下 |
+
+```bash
+curl -X POST $A/v1/services -d '{"name":"java-api","repo_url":"<仓库>","path":"demo/java-api","image_name":"java-api"}'
+curl -X POST $A/v1/builders -d '{"name":"java-maven","service":"java-api","repo_url":"<仓库>","context_path":"src/java-maven"}'
+curl -X POST $A/v1/pipelines/build-and-deploy/runs -d '{"builder":"java-maven","env":"dev5"}'
+```
+
+**Maven 在这个沙箱里的实测**:
+1. **第一次失败**:`PKIX path building failed: unable to find valid certification path`——Maven 访问 Maven Central 时,JDK 自己的信任库不认这个沙箱出口网关的中间人证书
+   (不是网络被拦:宿主机带 CA 访问同一个地址是 HTTP 200)。注意 `deployer-build` 里给 kaniko 挂的 `build-ca` 只让 **kaniko 自己**拉镜像、拉源码时信任它,**不影响 Dockerfile 里 `RUN` 出来的进程**。
+2. **解决办法(只用现有能力)**:Dockerfile 里加一个可选的 `ARG EXTRA_CA_PEM`,非空时用 `keytool -importcert -cacerts` 导入 JDK 信任库;证书通过 **builder 的 `build_args`** 传入。
+   传入网关根证书后:Maven 下载依赖、打 jar、做成镜像、部署到 dev5 全部成功,约 71 秒,响应 `{"version":"r39","java":"21.0.12.1"}`。
+3. 这个问题**只在出口 HTTPS 被中间人时出现**(沙箱、企业代理、自签 CA 的内部 Nexus 都会遇到);正常环境不需要 `EXTRA_CA_PEM`,参数为空时那一步什么都不做。
+4. 失败原因在 `message` 里:没有 kaniko 的 `Error:` 行时,取 `BUILD FAILURE` 之后第一条有内容的 `[ERROR] ...`(用真实的 Maven 失败验证过)。
+
+**边界(没做的,或没验证的)**:
+- **没有构建缓存**(`--cache=false`):每次构建都重新下载 Maven 依赖,依赖多的项目会很慢,也依赖外网稳定。可行的改进:内部 Maven 镜像仓库(Nexus/Artifactory)加 `settings.xml`,或给构建 Pod 挂持久卷放 `~/.m2`——两者都没做。
+- **Gradle 没测过**,理论上同样是多阶段 Dockerfile,同样会遇到依赖下载和 CA 的问题。
+- 构建 Pod 内存上限固定 2Gi、超时 15 分钟(`BUILD_TIMEOUT`),不能按 builder 单独调;大型 Java 项目可能不够。
+- 单元测试只有写进 Dockerfile 里才会跑(失败会让构建失败);没有独立的"测试"步骤、没有测试报告。
+- 没有把 jar 作为产物发布(比如上传到 Nexus),也没有 jar 的版本管理;镜像 tag 是运行号 `r<id>`,jar 的版本号在 `pom.xml` 里,两者互不关联。
+- 想要真正独立的"构建 jar → 构建镜像"两个步骤(各自状态、日志、产物传递),需要扩展:例如新增 builder 类型"自定义 Job"(指定构建镜像和命令),或用 Jib 直接从 Maven 构建并推镜像(不需要 Dockerfile 和 kaniko);这是新功能,没有实现。
+
 ## 对账循环(`reconcile.go`)
 - 每 10 秒一轮,API 写入后立即触发。多副本时用 MySQL `GET_LOCK` 选主,只有一个干活;leader 挂了锁随连接释放。
 - `desired_state=running`:不存在就创建 Application;存在但 `spec` 与期望不符(有人手改)就改回;然后把 Application 的

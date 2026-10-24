@@ -413,16 +413,31 @@ func (rn *Runner) gcJobs(ctx context.Context, active []Run) {
 
 func mustQty(s string) resource.Quantity { return resource.MustParse(s) }
 
-// lastError 取构建日志里最后一条 "Error: ..." 行(kaniko 失败时会打印它),最多 200 个字符。
+// lastError 从构建日志里提取失败原因,最多 200 个字符:
+//  1. kaniko 自己的错误:最后一条 "Error: ..." 行;
+//  2. Maven:没有上面那种行时,取 "BUILD FAILURE" 之后的第一条有内容的 "[ERROR] ..." 行(Java 构建出错主要是这个)。
 func lastError(log string) string {
 	lines := strings.Split(log, "\n")
+	clip := func(l string) string {
+		if len(l) > 200 {
+			return l[:200] + "…"
+		}
+		return l
+	}
 	for i := len(lines) - 1; i >= 0; i-- {
-		l := strings.TrimSpace(lines[i])
-		if strings.HasPrefix(l, "Error:") {
-			if len(l) > 200 {
-				l = l[:200] + "…"
+		if l := strings.TrimSpace(lines[i]); strings.HasPrefix(l, "Error:") {
+			return clip(l)
+		}
+	}
+	for i, l := range lines {
+		if !strings.Contains(l, "BUILD FAILURE") {
+			continue
+		}
+		for _, m := range lines[i+1:] {
+			m = strings.TrimSpace(m)
+			if strings.HasPrefix(m, "[ERROR]") && strings.TrimSpace(strings.TrimPrefix(m, "[ERROR]")) != "" {
+				return clip(m)
 			}
-			return l
 		}
 	}
 	return ""

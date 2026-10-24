@@ -201,3 +201,22 @@ func TestBlockingRun(t *testing.T) {
 		t.Errorf("a cancelled blocker must not block, got %d", got)
 	}
 }
+
+func TestLastErrorMaven(t *testing.T) {
+	mvn := "[INFO] Building java-api 1.0\n[INFO] BUILD FAILURE\n[INFO] ------\n[ERROR] Plugin org.apache.maven.plugins:maven-resources-plugin:3.4.0 could not be resolved: PKIX path building failed\n[ERROR] \n[ERROR] -> [Help 1]\nerror building image: exit status 1\n"
+	if got := lastError(mvn); got != "[ERROR] Plugin org.apache.maven.plugins:maven-resources-plugin:3.4.0 could not be resolved: PKIX path building failed" {
+		t.Errorf("got %q", got)
+	}
+	// kaniko 自己的 Error: 行优先于 Maven 的 [ERROR]
+	if got := lastError(mvn + "Error: error resolving dockerfile path\n"); got != "Error: error resolving dockerfile path" {
+		t.Errorf("kaniko error must win, got %q", got)
+	}
+	// 只有 [ERROR] 但没有 BUILD FAILURE:不乱猜
+	if lastError("[ERROR] something\n") != "" {
+		t.Error("[ERROR] without BUILD FAILURE must be ignored")
+	}
+	// 空的 [ERROR] 行要跳过
+	if got := lastError("BUILD FAILURE\n[ERROR] \n[ERROR] real cause\n"); got != "[ERROR] real cause" {
+		t.Errorf("must skip empty [ERROR] lines, got %q", got)
+	}
+}
