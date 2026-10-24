@@ -22,6 +22,11 @@ spec:
             # 可选:创建 Secret deployer-api(key: token)后 API 要求 Bearer token;原型默认不开
             - name: API_TOKEN
               valueFrom: {secretKeyRef: {name: deployer-api, key: token, optional: true}}
+            # 流水线(构建)配置;不写就用代码里的默认值。BUILD_CA_CONFIGMAP 指向的 ConfigMap 不存在也没关系(挂载是 optional 的)
+            - {name: BUILD_NAMESPACE, value: deployer-build}
+            - {name: REGISTRY_PUSH_HOST, value: "registry.deployer-build.svc:5000"}
+            - {name: REGISTRY_PULL_HOST, value: "localhost:30500"}
+            - {name: BUILD_CA_CONFIGMAP, value: build-ca}
             # Application 都放 argocd 命名空间、绑 AppProject apps(默认值,可用 APP_NAMESPACE / ARGOCD_PROJECT 改)
           ports:
             - containerPort: 8080

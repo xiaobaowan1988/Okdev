@@ -16,6 +16,7 @@ var nameRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 type API struct {
 	store *Store
 	rec   *Reconciler
+	run   *Runner
 	cfg   config
 	log   *slog.Logger
 }
@@ -35,6 +36,7 @@ func (a *API) routes() http.Handler {
 	m.HandleFunc("POST /v1/envs/{env}/services/{svc}/scale", a.scale)
 	m.HandleFunc("DELETE /v1/envs/{env}/services/{svc}", a.deleteEnvService)
 	m.HandleFunc("GET /v1/envs/{env}/services/{svc}/history", a.history)
+	a.pipelineRoutes(m)
 	return a.auth(m)
 }
 
@@ -122,7 +124,7 @@ func (a *API) deleteEnv(w http.ResponseWriter, r *http.Request) {
 	err := a.store.DeleteEnv(r.Context(), r.PathValue("env"))
 	var me *mysql.MySQLError
 	if errors.As(err, &me) && me.Number == 1451 { // 外键:还有部署引用这个环境
-		writeErr(w, http.StatusConflict, "environment still has deployments; remove them first")
+		writeErr(w, http.StatusConflict, "environment still has deployments or pipeline runs")
 		return
 	}
 	if err != nil {
@@ -196,7 +198,7 @@ func (a *API) deleteService(w http.ResponseWriter, r *http.Request) {
 	err := a.store.DeleteService(r.Context(), r.PathValue("name"))
 	var me *mysql.MySQLError
 	if errors.As(err, &me) && me.Number == 1451 { // 外键:还有部署引用这个服务
-		writeErr(w, http.StatusConflict, "service still has deployments; remove them first")
+		writeErr(w, http.StatusConflict, "service still has deployments or builders; remove them first")
 		return
 	}
 	if err != nil {

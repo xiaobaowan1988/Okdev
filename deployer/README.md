@@ -14,6 +14,9 @@
 | `environment` | 环境(名称唯一),就是几行记录 |
 | `service` | 服务:仓库、路径、要调副本数的 Deployment 名、镜像名 |
 | `env_service` | 服务在环境里的部署:期望状态(`desired_state`/`replicas`/`image`)、`version`(乐观锁)、`applied_version`、观测状态(`observed_*`);(环境,服务) 唯一 |
+| `builder` | 构建器:**关联一个服务**(外键),描述怎么构建它的镜像——源码仓库、分支、构建目录、Dockerfile、构建参数 |
+| `pipeline` | 流水线:命名的步骤序列,`["build"]` 或 `["build","deploy"]`(默认后者) |
+| `pipeline_run` | 流水线运行:运行时选 builder 和 env;状态机(`pending→building→deploying→succeeded/failed/cancelled`)持久化在这里 |
 | `deploy_history` | 每次变更的前后快照与操作人;按名字记录、无外键,部署被清理后审计仍在 |
 
 原型**没有**做 Zadig 那样的通用 `variables` JSON,只有 `replicas` 和 `image` 两个字段。
@@ -30,6 +33,13 @@ POST   /v1/envs/{env}/services/{svc}/scale     {"replicas","expected_version?"} 
 DELETE /v1/envs/{env}/services/{svc}                                                         # 下线
 GET    /v1/envs/{env}/services                                                               # 期望 + 观测状态
 GET    /v1/envs/{env}/services/{svc}/history
+
+POST   /v1/builders                            {"name","service","repo_url","ref?","context_path?","dockerfile?","build_args?"}   # service 必填
+GET    /v1/builders[?service=]   GET/PUT/DELETE /v1/builders/{name}                       # 名字和关联的服务不可改;有运行记录的构建器不能删(409)
+POST   /v1/pipelines             {"name","description?","steps?"}                           # steps 默认 ["build","deploy"]
+GET    /v1/pipelines             GET/PUT/DELETE /v1/pipelines/{name}                      # 有运行记录的流水线不能删(409)
+POST   /v1/pipelines/{name}/runs {"builder","env","ref?","replicas?"}                      # 运行流水线(202),选 builder 和 env
+GET    /v1/runs[?pipeline=&builder=&env=&status=&limit=]   GET /v1/runs/{id}   GET /v1/runs/{id}/log   POST /v1/runs/{id}/cancel
 ```
 `X-Actor` 头记录操作人;配置了 `API_TOKEN`(Secret `deployer-api`)则要求 `Authorization: Bearer`,**原型默认不开鉴权**。
 
@@ -42,25 +52,75 @@ GET    /v1/envs/{env}/services/{svc}/history
 2. **登记**:`POST /v1/services`。要按环境覆盖镜像,`image_name` 填清单里的镜像名(不带 tag)。登记错了用 `PUT /v1/services/{name}` 改。
 3. **部署**:`PUT /v1/envs/{env}/services/{svc}`,带 `replicas` 和/或 `image`;环境不存在先 `POST /v1/envs`。几秒后看 `GET /v1/envs/{env}/services` 的 `observed_*`。
 
-演示服务 `api`(`examples/api`,一个返回版本号和 Pod 名的 Go 服务;`scripts/build-example-api.sh v1|v2` 构建并导入集群,清单在 fork 的 `demo/api`):
+演示服务 `api`(源码和 Dockerfile 在 fork 的 `src/api`,一个返回版本号和 Pod 名的 Go 服务;清单在 fork 的 `demo/api`)。镜像由下面「构建与流水线」构建,不再手工导入:
 ```bash
 A=http://127.0.0.1:18080
 curl -X POST $A/v1/services -d '{"name":"api","repo_url":"https://github.com/xiaobaowan1988/argocd-example-apps.git","path":"demo/api","image_name":"api"}'
 curl -X POST $A/v1/envs -d '{"name":"dev3"}'
-curl -X PUT  $A/v1/envs/dev3/services/api -d '{"replicas":1,"image":"api:v1"}'    # 只在 dev3 调试
-curl -X PUT  $A/v1/envs/dev5/services/api -d '{"replicas":2,"image":"api:v2"}'    # 别的环境跑别的版本
-curl -X PUT  $A/v1/envs/dev7/services/api -d '{"replicas":0,"image":"api:v1"}'    # 部署了,但副本数 0
+curl -X PUT  $A/v1/envs/dev3/services/api -d '{"replicas":1,"image":"localhost:30500/api:r1"}'   # 只在 dev3 调试(镜像也可以由流水线自动写入)
+curl -X PUT  $A/v1/envs/dev7/services/api -d '{"replicas":0}'                                    # 部署了,但副本数 0
 ```
-**实测**(在本集群):`dev3` 响应 `{"version":"v1"}`、`dev5`(2 副本)响应 `{"version":"v2"}`、`dev7`(0 副本)连接被拒(没有后端 Pod);
-再单独把 `dev3` 的镜像改成 `api:v2`,滚动升级后它响应 `v2`,不影响其它环境;`dev5` 扩到 3 副本后 3/3 就绪。
+**实测**(在本集群,用手工导入的镜像 `api:v1/v2` 时):dev3 响应 `v1`、dev5(2 副本)响应 `v2`、dev7(0 副本)连接被拒;单独把 dev3 的镜像改成 `v2`,滚动升级后它响应 `v2`,不影响其它环境;dev5 扩到 3 副本后 3/3 就绪。
 故意把 `path` 写成 `demo/apii`:错误 `app path does not exist` 回显在 `observed_message`,用 `PUT /v1/services/api` 改正后该部署的 `version` 1→2、自动恢复 Synced/Healthy,
-历史里有 `create` 和 `service-update` 两条。服务删除:有部署时 409,先下线部署再删得 204,再删得 404;改名 400;缺 `repo_url`/`path` 400;不存在的服务 404。
+历史里有 `create` 和 `service-update` 两条。服务删除:有部署或构建器时 409,先下线再删得 204,再删得 404;改名 400;缺 `repo_url`/`path` 400;不存在的服务 404。
 
 **注意**:
 - 服务在别的仓库时,AppProject `apps` 的 `sourceRepos`(`manifests/apps/appproject.yaml`)目前只有 fork 一个地址,要先加上;私有仓库还要登记凭据(现在的 `repo.yaml` 只适用公共仓库)。
-- 镜像必须能被集群拉到。这里没有 CI 和镜像仓库,`api` 的镜像是本机构建后导入单节点集群的 containerd(`imagePullPolicy` 默认 IfNotPresent),多节点或真实环境要推到镜像仓库。
+- 镜像必须能被集群拉到。可以用「构建与流水线」在集群里构建并推到集群内仓库,也可以用你们自己的镜像仓库。(早期我是把本机构建的镜像直接导入 containerd,实测会被 kubelet 的镜像回收清掉没人用的镜像,不可靠,所以改成了仓库。)
 - 命名限制:服务名 ≤30、环境名 ≤20,`[a-z0-9-]`;命名空间 `<环境>-env-<服务>` 总长 ≤63。
 - 服务定义一改,它所有环境的部署都会跟着变(期望状态里的仓库/路径/镜像名/工作负载都来自服务定义)。
+
+## 构建与流水线
+**三个概念**:`builder` 描述"怎么构建某个服务的镜像"(**必须关联服务**);`pipeline` 是命名的步骤序列(`build`,可选 `deploy`);**运行流水线时选 builder 和 env**——
+构建成功后**自动调用 deployer 的部署逻辑**,把新镜像部署到所选环境,等它真正 Healthy 才算成功。
+
+```bash
+A=http://127.0.0.1:18080
+curl -X POST $A/v1/builders  -d '{"name":"api-main","service":"api","repo_url":"https://github.com/xiaobaowan1988/argocd-example-apps.git","ref":"master","context_path":"src/api"}'
+curl -X POST $A/v1/pipelines -d '{"name":"build-and-deploy","description":"构建镜像并部署到所选环境"}'
+curl -X POST $A/v1/pipelines/build-and-deploy/runs -d '{"builder":"api-main","env":"dev3"}'                    # 运行:选 builder 和 env
+curl -X POST $A/v1/pipelines/build-and-deploy/runs -d '{"builder":"api-main","env":"dev9","replicas":2}'       # 新环境,指定副本数
+curl $A/v1/runs/1                  # 状态、镜像、失败原因
+curl $A/v1/runs/1/log              # 构建日志
+curl -X POST $A/v1/runs/1/cancel   # 取消
+```
+
+**一次运行经过的步骤**(状态机持久化在 `pipeline_run`,执行器用 MySQL `GET_LOCK` 选主,多副本只有一个推进):
+1. `pending`:提交后排队;同时构建的上限是 `BUILD_CONCURRENCY`(默认 2),超过的继续排队。
+2. `building`:在 `deployer-build` 命名空间起一个 **kaniko Job**:从 git 拉 `ref`(分支或 `refs/...`)的源码,按 `context_path` 和 `dockerfile` 构建,
+   推到集群内仓库 `registry.deployer-build.svc:5000/<服务>:r<运行号>`。执行器**总是注入**构建参数 `VERSION=r<运行号>` 和 `GIT_REF=<ref>`(覆盖 builder 里同名的),
+   所以服务可以把版本编进二进制。构建超时 `BUILD_TIMEOUT`(默认 15 分钟)由 Job 的 `activeDeadlineSeconds` 保证。
+3. 构建成功:读 Pod 日志存进数据库,删掉 Job,然后进入**部署步骤**:以操作人 `pipeline-run-<id>` 调用与 `PUT /v1/envs/{env}/services/{svc}` 相同的逻辑,
+   把该环境里这个服务的镜像设为 `localhost:30500/<服务>:r<运行号>`(副本数沿用现有部署;还没有部署就用运行里指定的 `replicas`,再没有就是 1),状态 `deploying`。
+4. `deploying`:等对账循环把这一版**应用并且 Synced/Healthy**(`applied_version >= 写入时的 version` 且镜像等于本次的)才算 `succeeded`。
+   超过 `DEPLOY_TIMEOUT`(默认 10 分钟)→ `failed`;期间部署被别的变更改了镜像 → `failed`(superseded);部署被下线 → `failed`。
+5. 失败时 `message` 带上构建日志里最后一条 `Error:`,完整日志在 `/v1/runs/{id}/log`。取消会删掉构建 Job;**已经写进环境的部署不回滚**。
+- 只含 `["build"]` 的流水线只构建不部署,环境不受影响。镜像 tag 是运行号,不可变。
+
+**镜像仓库**(`manifests/deployer/build`,`scripts/deploy-build.sh`):原型是单实例、无鉴权、明文 HTTP,数据在节点 hostPath。推送和拉取用**不同的地址**:构建任务用集群内
+`registry.deployer-build.svc:5000`,节点用 NodePort `localhost:30500`(containerd 的 CRI 对 localhost 允许明文 HTTP,所以不用改 containerd 配置;已验证)。
+沙箱里 Pod 出口 HTTPS 被中间人,构建任务需要信任它的 CA:`deploy-build.sh` 在存在 `/root/.ccr/ca-bundle.crt` 时建 ConfigMap `build-ca`,Job 以 optional 方式挂载,没有也不影响。
+
+**配置**(环境变量,都有默认值):`BUILD_NAMESPACE`(`deployer-build`)、`REGISTRY_PUSH_HOST`、`REGISTRY_PULL_HOST`、`KANIKO_IMAGE`(`gcr.io/kaniko-project/executor:v1.23.2`)、
+`BUILD_CA_CONFIGMAP`、`BUILD_TIMEOUT`、`DEPLOY_TIMEOUT`、`BUILD_CONCURRENCY`。**权限**:在 `deployer-build` 命名空间里只有管理 Job、读 Pod 和日志,不含 Secret。
+
+**实测**(本集群):
+- 运行 `build-and-deploy`(builder `api-main`,env `dev3`):`pending→building→deploying→succeeded` 约 50 秒;dev3 的 Deployment 镜像变成 `localhost:30500/api:r1`,
+  访问服务响应 `{"version":"r1"}`(版本号是从源码编译时编进去的);部署历史里操作人是 `pipeline-run-1`;构建日志已保存、构建 Job 已清理。
+- 同时提交 3 个运行(并发上限 2):2 个 `building`、1 个 `pending`;结束后每个环境得到各自的镜像:dev5 保持 3 副本、dev7 保持 0 副本(镜像更新但没起 Pod)、新环境 dev9 按指定创建 2 副本。
+- 失败路径:不存在的分支 → `Error: error resolving source context: reference not found`;错误的 Dockerfile 路径 → `error resolving dockerfile path`;两次目标环境的镜像都没变,Job 已清理。
+- 取消:构建中取消 → Job 被删、状态 `cancelled`,再取消 409。**重启恢复**:构建中把 deployer Pod 删掉,新 Pod 接着把这次运行跑完(`succeeded`)。
+- 2 个 deployer 副本:只有一个副本推进了运行。只含 `build` 的流水线:构建了镜像,环境镜像不变。
+- 校验:builder 不关联服务/服务不存在/`repo_url` 非 http(s)/非法构建参数名/重名;运行时流水线、builder、env 不存在、缺 env、非法 ref、replicas 越界;
+  有运行记录的 builder、pipeline、env 不能删,有构建器的服务不能删(409);改构建器的关联服务 400。纯逻辑(git 上下文、Job 生成、步骤校验、Job 结果判断、部署判断、错误行提取)有 Go 单测。
+
+**没验证的 / 局限**:
+- **部署步骤超时失败的路径**只有单测(`deployVerdict`),没有在集群里造过一个永远起不来的镜像去等 10 分钟。
+- 只支持 `http(s)` 的**公共**仓库、按**分支或 ref** 构建;私有仓库的凭据、直接用 commit SHA 构建都没做。构建缓存关闭(`--cache=false`),每次从头构建。
+- 仓库是单实例、无鉴权、无镜像清理(tag 只增不减);只有单节点验证过,多节点要把 `REGISTRY_PULL_HOST` 换成每个节点都能访问的地址。
+- 用过的 builder 因为运行记录的外键**永远删不掉**(保留审计);测试时留下的 `api-badref`、`api-baddockerfile` 两个 builder 就是这样残留的。
+- 构建 Pod 以 root 运行(kaniko 的要求),没做更细的隔离;日志只保存末尾约 64KB。
+- 运行之间没有按服务/环境互斥:对同一个环境同时跑两个运行,后写入的镜像会让先写入的那个以 `superseded` 失败(这是按代码逻辑推断的,没有实测)。
 
 ## 对账循环(`reconcile.go`)
 - 每 10 秒一轮,API 写入后立即触发。多副本时用 MySQL `GET_LOCK` 选主,只有一个干活;leader 挂了锁随连接释放。
@@ -80,6 +140,7 @@ curl -X PUT  $A/v1/envs/dev7/services/api -d '{"replicas":0,"image":"api:v1"}'  
 ## 运行
 ```bash
 ./scripts/deploy-mysql.sh        # 集群里起 MySQL(namespace deployer;密码随机生成,只在集群 Secret 里)
+./scripts/deploy-build.sh        # 流水线需要的:构建命名空间 deployer-build 和集群内镜像仓库(NodePort 30500)
 ./scripts/build-deployer.sh      # 单测 + 静态编译 + 导入本机 k8s containerd(原型不经过镜像仓库)
 kubectl apply -k manifests/deployer/app
 kubectl -n deployer port-forward svc/deployer 18080:8080

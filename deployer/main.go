@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -25,6 +27,20 @@ type config struct {
 
 func getenv(k, d string) string {
 	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
+
+func getDuration(k string, d time.Duration) time.Duration {
+	if v, err := time.ParseDuration(os.Getenv(k)); err == nil && v > 0 {
+		return v
+	}
+	return d
+}
+
+func getInt(k string, d int) int {
+	if v, err := strconv.Atoi(os.Getenv(k)); err == nil && v > 0 {
 		return v
 	}
 	return d
@@ -89,7 +105,25 @@ func main() {
 	rec := NewReconciler(store, db, kube, cfg, log)
 	go rec.Run(ctx)
 
-	srv := &http.Server{Addr: cfg.listen, Handler: (&API{store: store, rec: rec, cfg: cfg, log: log}).routes(), ReadHeaderTimeout: 5 * time.Second}
+	clientset, err := kubernetes.NewForConfig(kc)
+	if err != nil {
+		log.Error("kube clientset", "err", err)
+		os.Exit(1)
+	}
+	bcfg := buildConfig{
+		namespace:     getenv("BUILD_NAMESPACE", "deployer-build"),
+		registryPush:  getenv("REGISTRY_PUSH_HOST", "registry.deployer-build.svc:5000"),
+		registryPull:  getenv("REGISTRY_PULL_HOST", "localhost:30500"),
+		kanikoImage:   getenv("KANIKO_IMAGE", "gcr.io/kaniko-project/executor:v1.23.2"),
+		caConfigMap:   getenv("BUILD_CA_CONFIGMAP", ""),
+		buildTimeout:  getDuration("BUILD_TIMEOUT", 15*time.Minute),
+		deployTimeout: getDuration("DEPLOY_TIMEOUT", 10*time.Minute),
+		concurrency:   getInt("BUILD_CONCURRENCY", 2),
+	}
+	runner := NewRunner(store, db, clientset, bcfg, log, rec.Kick)
+	go runner.Run(ctx)
+
+	srv := &http.Server{Addr: cfg.listen, Handler: (&API{store: store, rec: rec, run: runner, cfg: cfg, log: log}).routes(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)

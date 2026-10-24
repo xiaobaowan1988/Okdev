@@ -52,3 +52,34 @@ subjects:
   - kind: ServiceAccount
     name: deployer
     namespace: deployer
+---
+# 流水线执行器在构建命名空间里的权限:管理构建任务(Job)、读 Pod 和日志;不含 Secret、不含集群级权限
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer-builds
+  namespace: deployer-build
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deployer-builds
+  namespace: deployer-build
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: deployer-builds
+subjects:
+  - kind: ServiceAccount
+    name: deployer
+    namespace: deployer

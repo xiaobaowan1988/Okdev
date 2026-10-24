@@ -52,8 +52,9 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:
 环境是数据(几行记录),不是文件:新增环境、把应用推广/迁移到别的环境都是一次 API 调用,不用改仓库。
 详见 [deployer/README.md](deployer/README.md)(设计、API、实测结果、发现的问题、局限)。
 **加一个服务**:放一份 kustomize 清单 → `POST /v1/services` 登记 → `PUT /v1/envs/{env}/services/{svc}` 部署到环境,步骤和演示见 [deployer/README.md 的「添加一个服务」](deployer/README.md)。
+**构建与流水线**:builder(关联服务)描述怎么构建镜像,pipeline 运行时选 builder 和 env,构建完成后自动部署到所选环境(kaniko 在集群里构建,镜像推到集群内仓库),见 [deployer/README.md 的「构建与流水线」](deployer/README.md)。
 ```bash
-./scripts/deploy-mysql.sh && ./scripts/build-deployer.sh && kubectl apply -k manifests/deployer/app
+./scripts/deploy-mysql.sh && ./scripts/deploy-build.sh && ./scripts/build-deployer.sh && kubectl apply -k manifests/deployer/app
 ```
 
 **演进过程**:最初用 ApplicationSet + 每个应用每个环境一个标记文件(`envs/<环境>.yaml`)。能用,但环境一多
