@@ -58,8 +58,7 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:
 ```
 
 **演进过程**:最初用 ApplicationSet + 每个应用每个环境一个标记文件(`envs/<环境>.yaml`)。能用,但环境一多
-文件就按"应用 × 环境"增长。后来迁到 deployer:标记文件、两套 ApplicationSet 都已删除(导入用的
-`scripts/import-markers.sh` 保留作为迁移记录,标记文件可从 fork 的 git 历史取回)。
+文件就按"应用 × 环境"增长,所以迁到了 deployer;标记文件、ApplicationSet 和导入脚本都已删除(需要时从 git 历史取回)。
 
 ## Kustomize
 ```bash

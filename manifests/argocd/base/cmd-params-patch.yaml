@@ -1,10 +1,8 @@
-# 开启 "Apps in Any Namespace" 与 "ApplicationSet in any namespace"
+# 开启 "Apps in Any Namespace":允许 argocd 和 argocd-apps-* 命名空间里的 Application
+# (deployer 把 Application 放进 argocd-apps-<group>,边界由各自的 AppProject 约束)
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: argocd-cmd-params-cm
 data:
   application.namespaces: "argocd, argocd-apps-*"
-  applicationsetcontroller.namespaces: "argocd, argocd-apps-*"
-  # 跨命名空间的 ApplicationSet 要求:关闭 SCM provider 生成器,或配置 allowed.scm.providers
-  applicationsetcontroller.enable.scm.providers: "false"

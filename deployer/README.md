@@ -80,12 +80,12 @@ curl -X POST $A/v1/envs/dev1/services/web/scale -d '{"replicas":2}'
 - 对账是轮询(10s),没有 watch Application 事件;观测状态有延迟。
 - 没有 CI 自动化测试,MySQL 相关逻辑(并发、乐观锁)只做过手工验证。
 
-## 从 ApplicationSet + 标记文件迁移过来(已完成)
-`scripts/import-markers.sh <fork 目录>` 读取旧的 `demo/<应用>/envs/<环境>.yaml`,在 deployer 里建环境(group 取环境名去掉末尾数字)、
-建服务、部署(幂等)。迁移步骤与结果:
+## 从 ApplicationSet + 标记文件迁移过来(已完成,相关文件已删除)
+迁移时把旧的 `demo/<应用>/envs/<环境>.yaml` 标记导入了 deployer(环境 group 取环境名去掉末尾数字),步骤与结果:
 1. 给 `app-a/b/c` 加 Deployment(原来只有 ConfigMap,没有副本数可调);
 2. 导入标记 → 18 个部署(`app-a`: dev1–12 + test,`app-b`: dev1–3,`app-c`: dev3 + test);
    此时旧 ApplicationSet 生成的同名 Application 还在,deployer 报 `conflict: ... not managed by deployer` 且不动它们;
 3. 删两个 ApplicationSet → 它们的 Application 级联删除 → deployer 创建自己的 18 个 Application;
 4. 最终 18 个 Application 由 deployer 管理(2 个手写 `frontend` 不变),18 个 Deployment 全部就绪;
-5. 删除 fork 里的标记文件和 `tools/envs.sh`,删除 myk8s 里的 `manifests/appsets`。
+5. 删除标记文件、`tools/envs.sh`、ApplicationSet 清单、导入脚本,以及 Argo CD 里不再需要的 ApplicationSet 命名空间参数。
+导入脚本和标记文件可从 git 历史取回。
