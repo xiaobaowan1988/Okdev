@@ -19,8 +19,8 @@ import (
 )
 
 type config struct {
-	listen, appNamespace, project, destServer, apiToken string
-	reconcileEvery                                      time.Duration
+	listen, appNsPrefix, projectPrefix, destServer, apiToken string
+	reconcileEvery                                           time.Duration
 }
 
 func getenv(k, d string) string {
@@ -41,8 +41,8 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg := config{
 		listen:         getenv("LISTEN", ":8080"),
-		appNamespace:   getenv("APP_NAMESPACE", "argocd-apps-dev"),
-		project:        getenv("ARGOCD_PROJECT", "project-dev"),
+		appNsPrefix:    getenv("APP_NAMESPACE_PREFIX", "argocd-apps-"),
+		projectPrefix:  getenv("PROJECT_PREFIX", "project-"),
 		destServer:     getenv("DEST_SERVER", "https://kubernetes.default.svc"),
 		apiToken:       os.Getenv("API_TOKEN"),
 		reconcileEvery: 10 * time.Second,
@@ -96,7 +96,7 @@ func main() {
 		defer c()
 		srv.Shutdown(sctx)
 	}()
-	log.Info("listening", "addr", cfg.listen, "appNamespace", cfg.appNamespace)
+	log.Info("listening", "addr", cfg.listen)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("server", "err", err)
 		os.Exit(1)

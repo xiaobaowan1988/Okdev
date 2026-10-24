@@ -34,6 +34,7 @@ type EnvService struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 
 	// 来自 service 表,对账用
+	Group                                     string `json:"group"`
 	Repo, Path, Revision, Workload, ImageName string `json:"-"`
 }
 
@@ -61,6 +62,7 @@ var ddl = []string{
 	`CREATE TABLE IF NOT EXISTS environment (
 	  id BIGINT AUTO_INCREMENT PRIMARY KEY,
 	  name VARCHAR(63) NOT NULL UNIQUE,
+	  env_group VARCHAR(20) NOT NULL DEFAULT 'dev',
 	  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
 	`CREATE TABLE IF NOT EXISTS service (
 	  id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -117,27 +119,56 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	// 老库补列(MySQL 不支持 ADD COLUMN IF NOT EXISTS,先查 information_schema)
+	var n int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.COLUMNS
+	  WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='environment' AND COLUMN_NAME='env_group'`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE environment ADD COLUMN env_group VARCHAR(20) NOT NULL DEFAULT 'dev' AFTER name`); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func (s *Store) CreateEnv(ctx context.Context, name string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO environment(name) VALUES (?)`, name)
+// group 决定该环境的 Application 放在哪个配置命名空间、绑定哪个 AppProject(argocd-apps-<group> / project-<group>)。
+type Env struct {
+	Name  string `json:"name"`
+	Group string `json:"group"`
+}
+
+func (s *Store) CreateEnv(ctx context.Context, name, group string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO environment(name, env_group) VALUES (?,?)`, name, group)
 	return err
 }
 
-func (s *Store) ListEnvs(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name FROM environment ORDER BY id`)
+// 删除环境:还有部署(env_service 外键)时数据库会拒绝,由 API 转成 409。
+func (s *Store) DeleteEnv(ctx context.Context, name string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM environment WHERE name=?`, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ListEnvs(ctx context.Context) ([]Env, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, env_group FROM environment ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	out := []Env{}
 	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
+		var e Env
+		if err := rows.Scan(&e.Name, &e.Group); err != nil {
 			return nil, err
 		}
-		out = append(out, n)
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }
@@ -168,7 +199,7 @@ func (s *Store) ListServices(ctx context.Context) ([]Service, error) {
 
 const esSelect = `SELECT es.id, e.name, v.name, es.desired_state, es.replicas, es.image, es.version, es.applied_version,
   es.observed_sync, es.observed_health, COALESCE(es.observed_message,''), es.updated_at,
-  v.repo_url, v.path, v.revision, v.workload, v.image_name
+  v.repo_url, v.path, v.revision, v.workload, v.image_name, e.env_group
   FROM env_service es JOIN environment e ON e.id = es.env_id JOIN service v ON v.id = es.service_id `
 
 type scanner interface{ Scan(...any) error }
@@ -177,7 +208,7 @@ func scanES(r scanner) (EnvService, error) {
 	var x EnvService
 	err := r.Scan(&x.ID, &x.Env, &x.Service, &x.DesiredState, &x.Replicas, &x.Image, &x.Version, &x.AppliedVersion,
 		&x.ObservedSync, &x.ObservedHealth, &x.ObservedMessage, &x.UpdatedAt,
-		&x.Repo, &x.Path, &x.Revision, &x.Workload, &x.ImageName)
+		&x.Repo, &x.Path, &x.Revision, &x.Workload, &x.ImageName, &x.Group)
 	return x, err
 }
 

@@ -22,13 +22,21 @@ func TestSubsetEqual(t *testing.T) {
 }
 
 func TestDesiredApp(t *testing.T) {
-	r := &Reconciler{cfg: config{appNamespace: "argocd-apps-dev", project: "project-dev", destServer: "https://kubernetes.default.svc"}}
-	x := EnvService{Env: "dev1", Service: "web", Replicas: 0, Image: "r/nginx:1", Repo: "https://x/y.git", Path: "demo/web", Revision: "HEAD", Workload: "web", ImageName: "r/nginx"}
+	r := &Reconciler{cfg: config{appNsPrefix: "argocd-apps-", projectPrefix: "project-", destServer: "https://kubernetes.default.svc"}}
+	x := EnvService{Env: "dev1", Group: "dev", Service: "web", Replicas: 0, Image: "r/nginx:1", Repo: "https://x/y.git", Path: "demo/web", Revision: "HEAD", Workload: "web", ImageName: "r/nginx"}
 	app := r.desiredApp(x)
 	if app.GetName() != "web-dev1" || app.GetNamespace() != "argocd-apps-dev" {
 		t.Fatalf("bad identity %s/%s", app.GetNamespace(), app.GetName())
 	}
 	spec := app.Object["spec"].(map[string]any)
+	if spec["project"] != "project-dev" {
+		t.Fatalf("bad project %v", spec["project"])
+	}
+	tx := x
+	tx.Env, tx.Group = "test", "test"
+	if a := r.desiredApp(tx); a.GetNamespace() != "argocd-apps-test" || a.Object["spec"].(map[string]any)["project"] != "project-test" {
+		t.Fatalf("group not honored: %s %v", a.GetNamespace(), a.Object["spec"].(map[string]any)["project"])
+	}
 	if spec["destination"].(map[string]any)["namespace"] != "dev1-env-web" {
 		t.Fatalf("bad dest %v", spec["destination"])
 	}

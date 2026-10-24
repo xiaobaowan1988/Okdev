@@ -46,6 +46,10 @@ func (r *Reconciler) Kick() {
 func appName(x EnvService) string       { return x.Service + "-" + x.Env }
 func destNamespace(x EnvService) string { return x.Env + "-env-" + x.Service }
 
+// 环境所属 group 决定 Application 放哪个命名空间、绑哪个 AppProject(边界由 AppProject 约束)
+func (r *Reconciler) appNs(x EnvService) string     { return r.cfg.appNsPrefix + x.Group }
+func (r *Reconciler) projectOf(x EnvService) string { return r.cfg.projectPrefix + x.Group }
+
 // desiredApp 由数据库里的期望状态生成 Application。副本数/镜像通过 kustomize 参数覆盖传给 Argo CD。
 func (r *Reconciler) desiredApp(x EnvService) *unstructured.Unstructured {
 	kustomize := map[string]any{
@@ -59,7 +63,7 @@ func (r *Reconciler) desiredApp(x EnvService) *unstructured.Unstructured {
 		"kind":       "Application",
 		"metadata": map[string]any{
 			"name":      appName(x),
-			"namespace": r.cfg.appNamespace,
+			"namespace": r.appNs(x),
 			"labels": map[string]any{
 				labelManagedBy:     managedByValue,
 				"deployer/env":     x.Env,
@@ -68,7 +72,7 @@ func (r *Reconciler) desiredApp(x EnvService) *unstructured.Unstructured {
 			"finalizers": []any{finalizer},
 		},
 		"spec": map[string]any{
-			"project": r.cfg.project,
+			"project": r.projectOf(x),
 			"source": map[string]any{
 				"repoURL":        x.Repo,
 				"path":           x.Path,
@@ -116,8 +120,8 @@ func subsetEqual(want, have any) bool {
 	}
 }
 
-func (r *Reconciler) apps() dynamic.ResourceInterface {
-	return r.kube.Resource(appGVR).Namespace(r.cfg.appNamespace)
+func (r *Reconciler) apps(x EnvService) dynamic.ResourceInterface {
+	return r.kube.Resource(appGVR).Namespace(r.appNs(x))
 }
 
 func (r *Reconciler) Run(ctx context.Context) {
@@ -161,7 +165,7 @@ func (r *Reconciler) reconcileAll(ctx context.Context) {
 }
 
 func (r *Reconciler) reconcileOne(ctx context.Context, x EnvService) error {
-	live, err := r.apps().Get(ctx, appName(x), metav1.GetOptions{})
+	live, err := r.apps(x).Get(ctx, appName(x), metav1.GetOptions{})
 	missing := apierrors.IsNotFound(err)
 	if err != nil && !missing {
 		return err
@@ -180,7 +184,7 @@ func (r *Reconciler) reconcileOne(ctx context.Context, x EnvService) error {
 			return r.store.SetObservedOnly(ctx, x, "", "Deleting", "waiting for Argo CD to delete resources")
 		default:
 			r.log.Info("deleting application", "app", appName(x))
-			return r.apps().Delete(ctx, appName(x), metav1.DeleteOptions{})
+			return r.apps(x).Delete(ctx, appName(x), metav1.DeleteOptions{})
 		}
 	}
 
@@ -190,13 +194,13 @@ func (r *Reconciler) reconcileOne(ctx context.Context, x EnvService) error {
 		return r.store.SetObservedOnly(ctx, x, "", "Deleting", "previous Application is still being deleted")
 	case missing:
 		r.log.Info("creating application", "app", appName(x))
-		if live, err = r.apps().Create(ctx, want, metav1.CreateOptions{}); err != nil {
+		if live, err = r.apps(x).Create(ctx, want, metav1.CreateOptions{}); err != nil {
 			return err
 		}
 	case !subsetEqual(want.Object["spec"], live.Object["spec"]):
 		r.log.Info("drift detected, restoring application", "app", appName(x))
 		live.Object["spec"] = want.Object["spec"]
-		if live, err = r.apps().Update(ctx, live, metav1.UpdateOptions{}); err != nil {
+		if live, err = r.apps(x).Update(ctx, live, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
 	}

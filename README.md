@@ -23,16 +23,14 @@ kubectl get pods -A
 manifests/
 ├── argocd/base/               官方 install.yaml(v3.5.6)+ 开启 Apps in Any Namespace
 ├── argocd/overlays/sandbox/   沙箱专用:repo-server 信任出口网关 CA
-├── apps/common/               两个环境共用的仓库登记 Secret
-├── apps/dev/                  argocd-apps-dev、project-dev(只能发往 dev*-env-*,即 dev、dev1…devN)、frontend
-├── apps/test/                 argocd-apps-test、project-test(只能发往 test-env-*)、frontend
-└── appsets/{dev,test}/        演示:dev 一个 ApplicationSet 管所有开发环境(dev1…dev12);test 独立一个
+├── apps/common/               共用的仓库登记 Secret
+├── apps/dev/                  argocd-apps-dev、project-dev(只能发往 dev*-env-*)、手写的 frontend
+├── apps/test/                 argocd-apps-test、project-test(只能发往 test-env-*)、手写的 frontend
+└── deployer/                  MySQL + deployer 程序(见下),应用到环境的映射都在这里
 ```
 ```bash
 ./scripts/install-argocd.sh     # 检测到 /root/.ccr/ca-bundle.crt 时自动用 sandbox overlay
-./scripts/deploy-apps.sh dev    # 或 test:部署共享仓库登记 + 该环境的 AppProject + Application
-./scripts/deploy-appsets.sh     # 演示 ApplicationSet:每个环境生成 5 个 Application
-kubectl get appset,app -A
+./scripts/deploy-apps.sh dev    # 或 test:共享仓库登记 + 该环境组的 AppProject + frontend
 kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:8080, 用户 admin
 ```
 `argocd-server` 保持 ClusterIP,通过 port-forward 访问。
@@ -43,55 +41,27 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:
 - 沙箱里 Pod 访问 GitHub 经过出口网关 CA(与宿主机代理 CA 不同),所以把 CA bundle 覆盖挂载为
   repo-server 的系统信任库。**不要**往 `argocd-tls-certs-cm` 放 `github.com` 条目,否则 Argo CD
   对该主机只认那里的证书,仍会报 `unknown authority`。`ca-bundle.crt` 由脚本复制,已 gitignore。
-- **ApplicationSet 生成的 Application 与 ApplicationSet 在同一命名空间**,`template.metadata.namespace`
-  不会改变落点(会静默落到 ApplicationSet 所在命名空间)。所以每个环境一个 ApplicationSet,放在
-  `argocd-apps-<env>` 里,绑定 `project-<env>`。要让 ApplicationSet 跨命名空间,需要
-  `applicationsetcontroller.namespaces`,并关闭 SCM provider 生成器(或配置 allowed.scm.providers),
-  否则控制器启动失败。
-- 仓库地址指向 fork `xiaobaowan1988/argocd-example-apps`(`HEAD` = master)。ApplicationSet 扫描
-  `demo/*/envs/<env>.yaml`,每个应用目录是一个 kustomize 应用。命名空间由模板里的
-  `CreateNamespace=true` 创建,**不属于应用管理**;模板带 `resources-finalizer.argocd.argoproj.io`,
-  所以下线应用时 Application 和它部署的资源会级联删除,但**命名空间保留**(空的),需要时手动删除。
-  这样即使别的东西也放在同一命名空间里,也不会被误删。
+- 命名空间由 Application 的 `CreateNamespace=true` 创建,**不属于应用管理**;Application 带
+  `resources-finalizer`,下线时它部署的资源级联删除,但命名空间保留(空的),需要时手动删除。
   (曾试过把 Namespace 清单放进应用目录让它随应用删除,但会连命名空间里所有内容一起删,已放弃。)
-- **按环境选择性部署(开发环境有十几个,同一集群,环境间不需要隔离)**:应用目录下的
-  `envs/<环境>.yaml` 是部署标记,**环境名取自文件名**(`dev3.yaml` → 环境 dev3)。dev 只有**一个**
-  ApplicationSet,`files: demo/*/envs/dev*.yaml` 一次扫描所有开发环境;Application 名 `<应用>-<环境>`
-  (如 `app-c-dev3`),目标命名空间 `<环境>-env-<应用>`(如 `dev3-env-app-c`),全部绑定同一个
-  `project-dev`。新增环境不用改任何清单,只要有应用放 `envs/devN.yaml`;test 的标记是 `envs/test.yaml`,
-  由 test 自己的 ApplicationSet 处理(`dev*.yaml` 不会匹配它)。
-  标记文件的管理用 fork 里的 `tools/envs.sh`:
-  ```bash
-  tools/envs.sh enable app-a dev{1..12}   # 批量启用到 12 个环境
-  tools/envs.sh enable app-c dev3         # 只在 dev3 调试
-  tools/envs.sh enable app-c dev5 dev7    # 推广
-  tools/envs.sh disable app-c dev3        # 从 dev3 移除(= 迁移到 dev5、dev7)
-  tools/envs.sh list                      # 查看各应用部署在哪些环境
-  ```
-  下线(删标记文件)时 Application 和资源被清理,命名空间保留。
-  已验证:`app-c` 只在 dev3 → 加 dev5、dev7 → 删 dev3,三步 Application 均如预期出现/消失,
-  `app-a` 的 12 个不受影响。注意:所有开发环境的 Application 都在 `argocd-apps-dev` 一个命名空间里,
-  没有按环境隔离(本场景不需要);要隔离得回到"每个环境一个 ApplicationSet"。
-  files 生成器的 `path.path` 是标记文件所在目录(`demo/<应用>/envs`),
-  模板里用 `{{ dir .path.path }}` / `{{ base (dir .path.path) }}` / `{{ trimSuffix ".yaml" .path.filename }}`
-  取应用目录、应用名和环境名。标记文件里还可以放该环境的参数,模板用 `{{.参数名}}` 取值(未验证)。
 - 机器重启后进程不会自动恢复(无 systemd),运行 `./scripts/restart-cluster.sh` 即可,数据不丢。
-- 早先的验证:往 `demo/` 加 `app-d` → dev/test 各自动出现 Application 和命名空间;删目录 → 全部消失。
-  `frontend`(手写 Application)仍用 `CreateNamespace=true`,不受影响。
-  ApplicationSet 默认每 3 分钟轮询一次,可用 `argocd.argoproj.io/application-set-refresh=true` 注解立即刷新。
-- 规模化:往生成器的 `directories` 加路径(或让仓库目录约定自动被 `apps/*` 之类的通配匹配),
-  就会多出对应 Application;删目录则自动清理。
-- 镜像在共享出口 IP 下可能被 Docker Hub / public.ecr.aws 限流(429),
-  出现 ImagePullBackOff 时手动 `crictl pull <镜像>` 后删除对应 Pod 即可。
+- 镜像在共享出口 IP 下可能被 Docker Hub / public.ecr.aws 限流(429),可改用 `mirror.gcr.io/library/...`,
+  或手动 `crictl pull <镜像>` 后删除对应 Pod。
+
+## 应用到环境的映射:deployer(MySQL 存期望状态)
+代码仓库(fork `xiaobaowan1988/argocd-example-apps` 的 `demo/`)里**每个应用只有一份清单,不区分环境**。
+"哪个应用部署到哪些环境、副本数多少、镜像是什么"存在 MySQL,Go 程序 deployer 对账后创建 Argo CD Application。
+环境是数据(几行记录),不是文件:新增环境、把应用推广/迁移到别的环境都是一次 API 调用,不用改仓库。
+详见 [deployer/README.md](deployer/README.md)(设计、API、实测结果、发现的问题、局限)。
+```bash
+./scripts/deploy-mysql.sh && ./scripts/build-deployer.sh && kubectl apply -k manifests/deployer/app
+```
+
+**演进过程**:最初用 ApplicationSet + 每个应用每个环境一个标记文件(`envs/<环境>.yaml`)。能用,但环境一多
+文件就按"应用 × 环境"增长。后来迁到 deployer:标记文件、两套 ApplicationSet 都已删除(导入用的
+`scripts/import-markers.sh` 保留作为迁移记录,标记文件可从 fork 的 git 历史取回)。
 
 ## Kustomize
 ```bash
 ./scripts/install-kustomize.sh              # 默认 v5.8.1,可用 KUSTOMIZE_VERSION 覆盖
-```
-
-## deployer 原型(MySQL 存期望状态)
-参考 Zadig 的思路:MySQL 存"哪个服务部署到哪个环境、副本数多少",Go 程序对账后创建 Argo CD Application。
-详见 [deployer/README.md](deployer/README.md)(设计、API、实测结果、发现的问题、局限)。
-```bash
-./scripts/deploy-mysql.sh && ./scripts/build-deployer.sh && kubectl apply -k manifests/deployer/app
 ```
