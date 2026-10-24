@@ -165,6 +165,26 @@ curl -X POST $A/v1/pipelines/build-and-deploy/runs -d '{"builder":"java-maven","
 
 fork 里的三个示例(`src/api`、`src/java-plain`、`src/java-maven`)都是这个模式:Dockerfile 只有一个 `FROM` + `COPY`。
 
+**实测**(本集群,`build-and-deploy`,三个运行同时提交):
+| 运行 | builder / app | profile | 结果 |
+|---|---|---|---|
+| 43 | `api-main` / `go-app`(仓库脚本 `ci/build.sh`,go 编译) | 未指定 → app 默认 `prod` | 成功,dev3 响应 `{"profile":"prod","version":"r43"}` |
+| 44 | `java-plain` / `java-inline`(**内联脚本** javac+jar) | 未指定 → 默认 `default` | 成功,dev6 响应 `{"profile":"default","version":"r44"}` |
+| 45 | `java-maven` / `maven-app`(`ci/build.sh` → `mvn -P<profile>`,含 CA 导入) | 运行时覆盖 `prod`(app 默认是 `dev`) | 成功,dev7 响应 `{"profile":"prod","greeting":"hello from prod","version":"r45"}`:Maven profile 真的进了 jar |
+
+失败路径(只构建的流水线,每个都 `failed`,环境不受影响,Job 已清理),`message` 直接指出哪一步、为什么:
+- 脚本 `exit 3` → `build failed at step "script" (exit code 3) — boom`
+- `script_path` 指向不存在的文件 → `step "script" (exit code 2) — sh: can't open 'ci/nope.sh'`
+- Dockerfile 路径不存在 → `step "image" (exit code 1) — Error: error resolving dockerfile path ...`(脚本那步已成功,问题落在打镜像)
+- 构建环境镜像不存在 → `build cannot start: step "script": ImagePullBackOff ...`(很快失败,不用等满 15 分钟)
+
+**这一节没验证的**:
+- **没有 app 的老式 builder 只有单测**(Job 里只有 `git` 一步、用自己的 Dockerfile),没有在集群里再跑一遍:fork 里 `src/api` 的 Dockerfile 已改成单阶段,老式 builder 指向它会因为缺 `dist/api` 失败,所以我把三个现有 builder 都改成了 app 方式。
+- **`build-ca` ConfigMap 不存在时是否照常启动**没有实测(卷是 optional,但 kaniko 容器是用 `subPath` 挂载的,可能卡住 Pod 启动)。`deploy-build.sh` 会创建它,正常使用不受影响;在没有 CA 的环境里部署前请先实测或把 `BUILD_CA_CONFIGMAP` 留空(留空时不挂载)。
+- 脚本和构建 Pod 一样以 root 运行、能访问外网;脚本是**任意代码执行**,谁能创建 app/builder 谁就能在集群里跑代码(接口目前没有鉴权)。构建 Pod 没有 ServiceAccount token,但没做网络隔离。
+- 没有构建缓存(Maven 依赖每次重新下载);脚本步骤的内存/CPU 限制沿用固定值,不能按 app 调。
+- 测试里留下的 builder/app(`api-badref`、`api-baddockerfile`、`t-fail`、`t-noscript`、`t-nodocker`、`t-badimage`)因为运行记录外键删不掉,同上。
+
 ## 对账循环(`reconcile.go`)
 - 每 10 秒一轮,API 写入后立即触发。多副本时用 MySQL `GET_LOCK` 选主,只有一个干活;leader 挂了锁随连接释放。
 - `desired_state=running`:不存在就创建 Application;存在但 `spec` 与期望不符(有人手改)就改回;然后把 Application 的
