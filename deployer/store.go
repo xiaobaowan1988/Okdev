@@ -87,6 +87,17 @@ var ddl = []string{
 	  UNIQUE KEY uq_env_service (env_id, service_id),
 	  CONSTRAINT fk_es_env FOREIGN KEY (env_id) REFERENCES environment(id),
 	  CONSTRAINT fk_es_svc FOREIGN KEY (service_id) REFERENCES service(id))`,
+	// 应用(构建配方):用什么构建脚本、哪个 Dockerfile、默认 profile。脚本在构建环境镜像里运行,产出产物后
+	// 由 Dockerfile(单阶段)把产物打进镜像。script(内联脚本)和 script_path(仓库里的脚本路径)二选一。
+	`CREATE TABLE IF NOT EXISTS app (
+	  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+	  name VARCHAR(63) NOT NULL UNIQUE,
+	  description VARCHAR(255) NOT NULL DEFAULT '',
+	  script MEDIUMTEXT NULL,
+	  script_path VARCHAR(255) NOT NULL DEFAULT '',
+	  dockerfile VARCHAR(255) NOT NULL DEFAULT 'Dockerfile',
+	  profile VARCHAR(63) NOT NULL DEFAULT '',
+	  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
 	// 构建器:描述"怎么构建某个服务的镜像",必须关联一个服务(外键)
 	`CREATE TABLE IF NOT EXISTS builder (
 	  id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -159,6 +170,38 @@ func (s *Store) Migrate(ctx context.Context) error {
 	defer conn.ExecContext(context.Background(), `SELECT RELEASE_LOCK('deployer-migrate')`)
 	for _, stmt := range ddl {
 		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	// 后加的列/外键:MySQL 不支持 ADD COLUMN IF NOT EXISTS,先查 information_schema
+	addColumn := func(table, col, ddl string) error {
+		var n int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.COLUMNS
+		  WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?`, table, col).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			_, err := conn.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+col+" "+ddl)
+			return err
+		}
+		return nil
+	}
+	if err := addColumn("builder", "app_id", "BIGINT NULL"); err != nil {
+		return err
+	}
+	if err := addColumn("builder", "image", "VARCHAR(255) NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := addColumn("pipeline_run", "profile", "VARCHAR(63) NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	var fk int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+	  WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='builder' AND CONSTRAINT_NAME='fk_builder_app'`).Scan(&fk); err != nil {
+		return err
+	}
+	if fk == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE builder ADD CONSTRAINT fk_builder_app FOREIGN KEY (app_id) REFERENCES app(id)`); err != nil {
 			return err
 		}
 	}

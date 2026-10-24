@@ -7,7 +7,15 @@ DIR=$(cd "$(dirname "$0")/.." && pwd)
 CA=${BUILD_CA:-/root/.ccr/ca-bundle.crt}
 kubectl apply -k "$DIR/manifests/deployer/build"
 if [ -f "$CA" ]; then
-  kubectl -n deployer-build create configmap build-ca --from-file=build-ca.crt="$CA" --dry-run=client -o yaml | kubectl apply -f -
+  # build-ca.crt:完整信任链,给 git 用;extra-ca.crt:只有沙箱出口网关的根证书,构建脚本用它导入 JDK 等自带信任库的工具(见 $BUILD_EXTRA_CA_FILE)
+  EXTRA=$(mktemp)
+  trap 'rm -f "$EXTRA"' EXIT
+  awk '/BEGIN CERTIFICATE/{n++} {print > "'"$EXTRA".'"sprintf("%03d",n)}' "$CA"
+  for f in "$EXTRA".*; do
+    openssl x509 -in "$f" -noout -subject 2>/dev/null | grep -q 'O *= *Anthropic' && cat "$f" >> "$EXTRA"
+    rm -f "$f"
+  done
+  kubectl -n deployer-build create configmap build-ca --from-file=build-ca.crt="$CA" --from-file=extra-ca.crt="$EXTRA" --dry-run=client -o yaml | kubectl apply -f -
 fi
 kubectl -n deployer-build rollout status deploy/registry --timeout=180s
 echo "仓库:集群内 registry.deployer-build.svc:5000,节点上 localhost:30500"

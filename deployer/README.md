@@ -87,7 +87,7 @@ curl -X POST $A/v1/runs/1/cancel   # 取消
 
 **一次运行经过的步骤**(状态机持久化在 `pipeline_run`,执行器用 MySQL `GET_LOCK` 选主,多副本只有一个推进):
 1. `pending`:提交后排队。**同一个 (环境, 服务) 的运行严格按提交顺序串行**:前面还有没结束的(排队中、构建中、部署中),就继续排队,`message` 里写明 `queued: waiting for run N`;前一个结束(成功、失败或取消)后下一个才开始。不同环境或不同服务之间仍然并行,同时构建的总上限是 `BUILD_CONCURRENCY`(默认 2)。
-2. `building`:在 `deployer-build` 命名空间起一个 **kaniko Job**:从 git 拉 `ref`(分支或 `refs/...`)的源码,按 `context_path` 和 `dockerfile` 构建,
+2. `building`:在 `deployer-build` 命名空间起一个**构建 Job**(一个 Pod:git 拉源码 →(有 app 时)跑构建脚本 → kaniko 打镜像,详见下一节),按 `context_path` 和 `dockerfile` 构建,
    推到集群内仓库 `registry.deployer-build.svc:5000/<服务>:r<运行号>`。执行器**总是注入**构建参数 `VERSION=r<运行号>` 和 `GIT_REF=<ref>`(覆盖 builder 里同名的),
    所以服务可以把版本编进二进制。构建超时 `BUILD_TIMEOUT`(默认 15 分钟)由 Job 的 `activeDeadlineSeconds` 保证。
 3. 构建成功:读 Pod 日志存进数据库,删掉 Job,然后进入**部署步骤**:以操作人 `pipeline-run-<id>` 调用与 `PUT /v1/envs/{env}/services/{svc}` 相同的逻辑,
@@ -99,10 +99,10 @@ curl -X POST $A/v1/runs/1/cancel   # 取消
 
 **镜像仓库**(`manifests/deployer/build`,`scripts/deploy-build.sh`):原型是单实例、无鉴权、明文 HTTP,数据在节点 hostPath。推送和拉取用**不同的地址**:构建任务用集群内
 `registry.deployer-build.svc:5000`,节点用 NodePort `localhost:30500`(containerd 的 CRI 对 localhost 允许明文 HTTP,所以不用改 containerd 配置;已验证)。
-沙箱里 Pod 出口 HTTPS 被中间人,构建任务需要信任它的 CA:`deploy-build.sh` 在存在 `/root/.ccr/ca-bundle.crt` 时建 ConfigMap `build-ca`,Job 以 optional 方式挂载,没有也不影响。
+沙箱里 Pod 出口 HTTPS 被中间人,构建任务需要信任它的 CA:`deploy-build.sh` 在存在 `/root/.ccr/ca-bundle.crt` 时建 ConfigMap `build-ca`(`build-ca.crt` 完整信任链 + `extra-ca.crt` 网关根证书),Job 以 optional 方式挂载。
 
 **配置**(环境变量,都有默认值):`BUILD_NAMESPACE`(`deployer-build`)、`REGISTRY_PUSH_HOST`、`REGISTRY_PULL_HOST`、`KANIKO_IMAGE`(`gcr.io/kaniko-project/executor:v1.23.2`)、
-`BUILD_CA_CONFIGMAP`、`BUILD_TIMEOUT`、`DEPLOY_TIMEOUT`、`BUILD_CONCURRENCY`。**权限**:在 `deployer-build` 命名空间里只有管理 Job、读 Pod 和日志,不含 Secret。
+`GIT_IMAGE`(`mirror.gcr.io/alpine/git:latest`,拉源码用)、`BUILD_CA_CONFIGMAP`、`BUILD_TIMEOUT`、`DEPLOY_TIMEOUT`、`BUILD_CONCURRENCY`。**权限**:在 `deployer-build` 命名空间里只有管理 Job、读 Pod 和日志,不含 Secret。
 
 **实测**(本集群):
 - 运行 `build-and-deploy`(builder `api-main`,env `dev3`):`pending→building→deploying→succeeded` 约 50 秒;dev3 的 Deployment 镜像变成 `localhost:30500/api:r1`,
@@ -125,38 +125,45 @@ curl -X POST $A/v1/runs/1/cancel   # 取消
   **修复后的实测**:同时提交 3 次,每次都是同一时刻只有 1 个构建 Job,后提交的显示 `queued: waiting for run N`,两个依次 `succeeded`(间隔约 5 秒,即前一个结束后下一个才开始),最终环境里是编号更大的、部署历史顺序与提交顺序一致;
   不同环境同时提交仍然并行(2 个 Job 同时构建);取消排在前面的运行后排队的接着开始;前面的运行失败后排队的不会被卡住;排队中途重启 deployer,队列仍然正确(它是从数据库推导的)。
   代价:同一环境同一服务的连续运行变慢(依次各约 50 秒);排在前面的运行如果卡住(构建最长 15 分钟、部署最长 10 分钟),后面的都得等它超时或被取消。
-## Java 服务:先打 jar,再构建镜像
-**支持,方式是多阶段 Dockerfile**:第一阶段用 JDK/Maven 把源码打成 jar,第二阶段只把 jar 拷进 JRE 镜像。builder 照常指向这个 Dockerfile,不需要任何代码改动。
-**不是**流水线里一个独立的"构建 jar"步骤——流水线的步骤目前只有 `build` 和 `deploy`,jar 是在 `build`(kaniko 构建镜像)里面的第一个阶段打出来的,没有单独的产物、也没有单独的状态。
+## 自定义构建脚本、Dockerfile 和 profile(`app`)
+不用多阶段 Dockerfile:**先跑一段你自己的构建脚本**(编译、`mvn package`、`npm run build` 都行),产物留在工作目录里,**再用单阶段 Dockerfile 把产物打进镜像**。
+数据库里的 `app` 说明一个服务"怎么构建":用什么构建脚本、哪个 Dockerfile、默认 profile。
 
-fork 里有两个可运行的示例(都实测过,服务是 `java-api`,清单在 `demo/java-api`):
+> **关于这个设计的一个假设,不对请告诉我**:我把 `app` 理解为**构建配方**(脚本 + Dockerfile + 默认 profile),`builder` 仍然是"某个服务从哪个仓库、哪个分支、哪个子目录构建",
+> 并通过 `app` 字段引用一个配方、再用 `image` 指定脚本运行的**构建环境镜像**(比如 `maven:3.9-eclipse-temurin-21`)。运行流水线时仍然选 builder 和 env,可选地覆盖 `profile`。
+> 好处是同一份配方(比如"Maven 服务")可以被多个 builder 复用。如果你想要的是 `app` 直接代表一个可部署的应用(并和 service 合并),这个模型要改。
 
-| 示例 | 打 jar 的方式 | 需要外网 | 实测 |
-|---|---|---|---|
-| `src/java-plain` | `javac` + `jar`(JDK 自带) | 否 | build-and-deploy 到 dev3,约 75 秒;响应 `{"version":"r37","java":"21.0.12.1"}` |
-| `src/java-maven` | `mvn package`(`maven-jar-plugin`) | 是(Maven Central) | 见下 |
+| 对象 | 字段 |
+|---|---|
+| `app` | `name`、`script`(内联脚本)**或** `script_path`(仓库里的脚本,相对 `context_path`,二选一)、`dockerfile`(相对 `context_path`,默认 `Dockerfile`)、`profile`(默认 profile)、`description` |
+| `builder` | 原有字段(`service`、`repo_url`、`ref`、`context_path`、`build_args`)+ 可选 `app` + `image`(有 `app` 时必填,是脚本运行的镜像;有 `app` 时不能再写 `dockerfile`) |
+| 运行 | 可选 `profile`,不填就用 app 的默认值 |
 
 ```bash
-curl -X POST $A/v1/services -d '{"name":"java-api","repo_url":"<仓库>","path":"demo/java-api","image_name":"java-api"}'
-curl -X POST $A/v1/builders -d '{"name":"java-maven","service":"java-api","repo_url":"<仓库>","context_path":"src/java-maven"}'
-curl -X POST $A/v1/pipelines/build-and-deploy/runs -d '{"builder":"java-maven","env":"dev5"}'
+# 仓库里的脚本 + Maven profile
+curl -X POST $A/v1/apps -d '{"name":"maven-app","script_path":"ci/build.sh","dockerfile":"Dockerfile","profile":"dev"}'
+# 内联脚本(存在数据库里,最大 64KB)
+curl -X POST $A/v1/apps -d '{"name":"java-inline","script":"mkdir -p out && javac -d out src/*.java && ...","profile":"default"}'
+curl -X POST $A/v1/builders -d '{"name":"java-maven","service":"java-api","app":"maven-app","image":"mirror.gcr.io/library/maven:3.9-eclipse-temurin-21","repo_url":"<仓库>","context_path":"src/java-maven"}'
+curl -X POST $A/v1/pipelines/build-and-deploy/runs -d '{"builder":"java-maven","env":"dev5","profile":"prod"}'   # 本次用 prod
 ```
 
-**Maven 在这个沙箱里的实测**:
-1. **第一次失败**:`PKIX path building failed: unable to find valid certification path`——Maven 访问 Maven Central 时,JDK 自己的信任库不认这个沙箱出口网关的中间人证书
-   (不是网络被拦:宿主机带 CA 访问同一个地址是 HTTP 200)。注意 `deployer-build` 里给 kaniko 挂的 `build-ca` 只让 **kaniko 自己**拉镜像、拉源码时信任它,**不影响 Dockerfile 里 `RUN` 出来的进程**。
-2. **解决办法(只用现有能力)**:Dockerfile 里加一个可选的 `ARG EXTRA_CA_PEM`,非空时用 `keytool -importcert -cacerts` 导入 JDK 信任库;证书通过 **builder 的 `build_args`** 传入。
-   传入网关根证书后:Maven 下载依赖、打 jar、做成镜像、部署到 dev5 全部成功,约 71 秒,响应 `{"version":"r39","java":"21.0.12.1"}`。
-3. 这个问题**只在出口 HTTPS 被中间人时出现**(沙箱、企业代理、自签 CA 的内部 Nexus 都会遇到);正常环境不需要 `EXTRA_CA_PEM`,参数为空时那一步什么都不做。
-4. 失败原因在 `message` 里:没有 kaniko 的 `Error:` 行时,取 `BUILD FAILURE` 之后第一条有内容的 `[ERROR] ...`(用真实的 Maven 失败验证过)。
+**一次构建在一个 Pod 里按顺序做三步**(共用一个 emptyDir `/workspace`):
+1. `git`(init 容器):把 `ref` 拉到 `/workspace`。
+2. `script`(init 容器,只有关联了 app 才有):在 builder 的 `image` 里,**工作目录是 `context_path`**,运行脚本;非 0 退出 → 构建失败,不会进入打镜像。
+   内联脚本以 `sh -ec` 运行;`script_path` 的脚本如果有可执行权限就按它的 shebang 运行,否则用 `sh`。
+3. `kaniko`:上下文就是 `context_path`(脚本产物也在里面),按 app 的 Dockerfile 打单阶段镜像并推送。
 
-**边界(没做的,或没验证的)**:
-- **没有构建缓存**(`--cache=false`):每次构建都重新下载 Maven 依赖,依赖多的项目会很慢,也依赖外网稳定。可行的改进:内部 Maven 镜像仓库(Nexus/Artifactory)加 `settings.xml`,或给构建 Pod 挂持久卷放 `~/.m2`——两者都没做。
-- **Gradle 没测过**,理论上同样是多阶段 Dockerfile,同样会遇到依赖下载和 CA 的问题。
-- 构建 Pod 内存上限固定 2Gi、超时 15 分钟(`BUILD_TIMEOUT`),不能按 builder 单独调;大型 Java 项目可能不够。
-- 单元测试只有写进 Dockerfile 里才会跑(失败会让构建失败);没有独立的"测试"步骤、没有测试报告。
-- 没有把 jar 作为产物发布(比如上传到 Nexus),也没有 jar 的版本管理;镜像 tag 是运行号 `r<id>`,jar 的版本号在 `pom.xml` 里,两者互不关联。
-- 想要真正独立的"构建 jar → 构建镜像"两个步骤(各自状态、日志、产物传递),需要扩展:例如新增 builder 类型"自定义 Job"(指定构建镜像和命令),或用 Jib 直接从 Maven 构建并推镜像(不需要 Dockerfile 和 kaniko);这是新功能,没有实现。
+**脚本能用的环境变量**(执行器注入,**覆盖** builder 里同名的 `build_args`;builder 的 `build_args` 也会作为环境变量给脚本,同时作为 `--build-arg` 给 Dockerfile):
+`VERSION`(`r<运行号>`)、`PROFILE`、`GIT_REF`、`SERVICE`、`DEPLOY_ENV`、`WORKSPACE`(上下文目录)、`BUILD_EXTRA_CA_FILE`(见下)。Dockerfile 里用 `ARG VERSION`、`ARG PROFILE` 接。
+
+**沙箱里的 CA**:出口 HTTPS 被中间人,git 用 `/etc/build-ca/build-ca.crt`;JDK 自带信任库不认它,所以 `deploy-build.sh` 还会放一个只含沙箱网关根证书的 `extra-ca.crt`,脚本可以用 `$BUILD_EXTRA_CA_FILE` 导入自己的信任库
+(见 fork 里 `src/java-maven/ci/build.sh`)。正常环境没有这个问题,变量指向的文件不存在时脚本里跳过即可。
+
+**没有 `app` 的 builder 照旧**:只有 `git` → `kaniko`,用 builder 自己的 `dockerfile`,没有脚本、没有 `PROFILE`。
+**失败信息按步骤给**:`message` 形如 `build failed at step "script" (exit code 1) — [ERROR] ...`;日志按步骤分段(`=== step: checkout|script|image ===`);构建镜像拉不下来(`ImagePullBackOff`)会尽早失败,不用等满超时。
+
+fork 里的三个示例(`src/api`、`src/java-plain`、`src/java-maven`)都是这个模式:Dockerfile 只有一个 `FROM` + `COPY`。
 
 ## 对账循环(`reconcile.go`)
 - 每 10 秒一轮,API 写入后立即触发。多副本时用 MySQL `GET_LOCK` 选主,只有一个干活;leader 挂了锁随连接释放。

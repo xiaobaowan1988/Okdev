@@ -11,69 +11,161 @@ import (
 
 func testCfg() buildConfig {
 	return buildConfig{namespace: "deployer-build", registryPush: "registry.deployer-build.svc:5000", registryPull: "localhost:30500",
-		kanikoImage: "kaniko:test", caConfigMap: "build-ca", buildTimeout: 15 * time.Minute, deployTimeout: 10 * time.Minute, concurrency: 2}
+		kanikoImage: "kaniko:test", gitImage: "git:test", caConfigMap: "build-ca", buildTimeout: 15 * time.Minute, deployTimeout: 10 * time.Minute, concurrency: 2}
 }
 
-func TestGitContext(t *testing.T) {
-	cases := []struct{ repo, ref, want string }{
-		{"https://github.com/o/r.git", "master", "git://github.com/o/r.git#refs/heads/master"},
-		{"https://github.com/o/r", "feature/x", "git://github.com/o/r.git#refs/heads/feature/x"},
-		{"https://github.com/o/r.git", "refs/tags/v1", "git://github.com/o/r.git#refs/tags/v1"},
-	}
-	for _, c := range cases {
-		got, err := gitContext(c.repo, c.ref)
-		if err != nil || got != c.want {
-			t.Errorf("gitContext(%q,%q) = %q, %v; want %q", c.repo, c.ref, got, err, c.want)
+func TestValidateRepoRef(t *testing.T) {
+	for _, ok := range [][2]string{{"https://github.com/o/r.git", "master"}, {"http://git.local/o/r", "feature/x"}, {"https://github.com/o/r", "refs/tags/v1"}, {"https://github.com/o/r", "0a1b2c3d4e5f"}} {
+		if err := validateRepoRef(ok[0], ok[1]); err != nil {
+			t.Errorf("%v should be valid: %v", ok, err)
 		}
 	}
-	for _, bad := range [][2]string{{"git@github.com:o/r.git", "master"}, {"ftp://x/y", "master"}, {"https://github.com/o/r", "a b"}, {"https://github.com/o/r", "a/../b"}, {"https://github.com/o/r", "x;rm"}} {
-		if _, err := gitContext(bad[0], bad[1]); err == nil {
+	for _, bad := range [][2]string{{"git@github.com:o/r.git", "master"}, {"ftp://x/y", "master"}, {"https://", "master"}, {"https://github.com/o/r", "a b"}, {"https://github.com/o/r", "a/../b"}, {"https://github.com/o/r", "x;rm"}, {"https://github.com/o/r", "--upload-pack=x"}, {"https://github.com/o/r", ""}} {
+		if err := validateRepoRef(bad[0], bad[1]); err == nil {
 			t.Errorf("expected error for %v", bad)
 		}
 	}
 }
 
-func TestBuildJob(t *testing.T) {
-	r := Run{ID: 7, Service: "api", Ref: "master", RepoURL: "https://github.com/o/r.git", ContextPath: "src/api", Dockerfile: "Dockerfile",
-		BuildArgs: map[string]string{"FOO": "bar", "VERSION": "user-supplied"}}
-	job, err := buildJob(r, testCfg())
+func container(cs []corev1.Container, name string) *corev1.Container {
+	for i := range cs {
+		if cs[i].Name == name {
+			return &cs[i]
+		}
+	}
+	return nil
+}
+
+func envMap(c *corev1.Container) map[string]string {
+	m := map[string]string{}
+	for _, e := range c.Env {
+		m[e.Name] = e.Value
+	}
+	return m
+}
+
+func appRun() Run {
+	return Run{ID: 7, Service: "api", Env: "dev3", Ref: "master", RepoURL: "https://github.com/o/r.git", ContextPath: "src/api",
+		Dockerfile: "Dockerfile.pkg", App: "go-app", Profile: "prod", BuilderImage: "golang:1.24-alpine", Script: "go build -o dist/api .",
+		BuildArgs: map[string]string{"FOO": "bar", "VERSION": "user-supplied", "PROFILE": "user-profile"}}
+}
+
+// 关联了 app:三步(git → script → kaniko),脚本在构建环境镜像里运行,Dockerfile 来自 app。
+func TestBuildJobWithApp(t *testing.T) {
+	job, err := buildJob(appRun(), testCfg())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if job.Name != "build-7" || job.Namespace != "deployer-build" || job.Labels["deployer/run"] != "7" {
 		t.Fatalf("bad identity: %s/%s %v", job.Namespace, job.Name, job.Labels)
 	}
-	args := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
-	for _, want := range []string{
-		"--context=git://github.com/o/r.git#refs/heads/master", "--context-sub-path=src/api", "--dockerfile=Dockerfile",
-		"--destination=registry.deployer-build.svc:5000/api:r7", "--insecure", "--build-arg=FOO=bar", "--build-arg=GIT_REF=master",
-		"--build-arg=VERSION=r7", // 执行器注入的 VERSION 必须覆盖用户传的同名参数
-	} {
-		if !strings.Contains(args, want) {
-			t.Errorf("args missing %q in: %s", want, args)
+	pod := job.Spec.Template.Spec
+	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+		t.Error("build pods run arbitrary scripts and must not get a service account token")
+	}
+	if len(pod.InitContainers) != 2 || pod.InitContainers[0].Name != "git" || pod.InitContainers[1].Name != "script" {
+		t.Fatalf("expected init containers [git script], got %+v", pod.InitContainers)
+	}
+	git, script, kaniko := &pod.InitContainers[0], &pod.InitContainers[1], &pod.Containers[0]
+	if git.Image != "git:test" || script.Image != "golang:1.24-alpine" || kaniko.Image != "kaniko:test" {
+		t.Errorf("images: %s %s %s", git.Image, script.Image, kaniko.Image)
+	}
+	if script.WorkingDir != "/workspace/src/api" {
+		t.Errorf("script must run in the context dir, got %q", script.WorkingDir)
+	}
+	// 内联脚本原样作为 sh -e 的参数
+	if strings.Join(script.Command, "|") != "sh|-ec|go build -o dist/api ." {
+		t.Errorf("script command: %v", script.Command)
+	}
+	// 环境变量:保留名由执行器注入,覆盖用户同名参数;用户参数同时可见
+	env := envMap(script)
+	for k, want := range map[string]string{"VERSION": "r7", "PROFILE": "prod", "GIT_REF": "master", "SERVICE": "api", "DEPLOY_ENV": "dev3",
+		"WORKSPACE": "/workspace/src/api", "BUILD_EXTRA_CA_FILE": "/etc/build-ca/extra-ca.crt", "FOO": "bar"} {
+		if env[k] != want {
+			t.Errorf("script env %s = %q, want %q", k, env[k], want)
 		}
 	}
-	if strings.Contains(args, "user-supplied") {
-		t.Error("user-supplied VERSION must be overridden")
+	// kaniko:上下文是共享目录,Dockerfile 用绝对路径,构建参数与脚本环境一致
+	args := strings.Join(kaniko.Args, " ")
+	for _, want := range []string{"--context=dir:///workspace/src/api", "--dockerfile=/workspace/src/api/Dockerfile.pkg",
+		"--destination=registry.deployer-build.svc:5000/api:r7", "--insecure", "--build-arg=FOO=bar", "--build-arg=PROFILE=prod",
+		"--build-arg=VERSION=r7", "--build-arg=GIT_REF=master"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("kaniko args missing %q in: %s", want, args)
+		}
+	}
+	if strings.Contains(args, "user-supplied") || strings.Contains(args, "user-profile") {
+		t.Error("reserved vars must not be overridable by build_args")
+	}
+	// git 步骤的仓库和 ref 通过环境变量传入(不拼进脚本),避免注入
+	if e := envMap(git); e["REPO"] != "https://github.com/o/r.git" || e["REF"] != "master" || strings.Contains(git.Command[2], "o/r.git") {
+		t.Errorf("git env/command: %v / %q", e, git.Command[2])
 	}
 	if *job.Spec.ActiveDeadlineSeconds != 900 || *job.Spec.BackoffLimit != 0 {
 		t.Errorf("bad deadline/backoff: %d %d", *job.Spec.ActiveDeadlineSeconds, *job.Spec.BackoffLimit)
 	}
-	if v := job.Spec.Template.Spec.Volumes; len(v) != 1 || !*v[0].ConfigMap.Optional {
-		t.Errorf("CA volume must be optional: %+v", v)
+	var ca *corev1.Volume
+	for i := range pod.Volumes {
+		if pod.Volumes[i].Name == "ca" {
+			ca = &pod.Volumes[i]
+		}
 	}
-	// 构建目录是 "." 时不应带 --context-sub-path;没配 CA 时不挂卷
-	r.ContextPath = "."
+	if ca == nil || !*ca.ConfigMap.Optional {
+		t.Errorf("CA volume must exist and be optional: %+v", pod.Volumes)
+	}
+}
+
+// 仓库里的脚本:用环境变量传路径(不拼进命令),有可执行权限按 shebang 运行,否则用 sh。
+func TestBuildJobScriptPath(t *testing.T) {
+	r := appRun()
+	r.Script, r.ScriptPath = "", "ci/build.sh"
+	job, err := buildJob(r, testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := container(job.Spec.Template.Spec.InitContainers, "script")
+	if envMap(script)["APP_SCRIPT_PATH"] != "ci/build.sh" || strings.Contains(script.Command[2], "ci/build.sh") || !strings.Contains(script.Command[2], `[ -x "$APP_SCRIPT_PATH" ]`) {
+		t.Errorf("script path handling: env=%v cmd=%q", envMap(script), script.Command[2])
+	}
+}
+
+// 没有 app:老式构建器,只有 git → kaniko,用构建器自己的 Dockerfile,没有 script 步骤。
+func TestBuildJobLegacyNoApp(t *testing.T) {
+	r := Run{ID: 3, Service: "api", Ref: "master", RepoURL: "https://github.com/o/r.git", ContextPath: ".", Dockerfile: "Dockerfile"}
 	cfg := testCfg()
 	cfg.caConfigMap = ""
-	job, _ = buildJob(r, cfg)
-	if a := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " "); strings.Contains(a, "context-sub-path") || len(job.Spec.Template.Spec.Volumes) != 0 {
-		t.Errorf("unexpected sub-path/volume: %s", a)
+	job, err := buildJob(r, cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// 非法构建参数名
-	r.BuildArgs = map[string]string{"bad name": "x"}
-	if _, err := buildJob(r, testCfg()); err == nil {
-		t.Error("invalid build arg name must be rejected")
+	pod := job.Spec.Template.Spec
+	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != "git" {
+		t.Fatalf("legacy builder must have only the git step: %+v", pod.InitContainers)
+	}
+	a := strings.Join(pod.Containers[0].Args, " ")
+	if !strings.Contains(a, "--context=dir:///workspace ") || !strings.Contains(a, "--dockerfile=/workspace/Dockerfile ") || strings.Contains(a, "--build-arg=PROFILE") {
+		t.Errorf("legacy args: %s", a)
+	}
+	// 没配 CA:不挂 CA 卷,git 容器不需要那个挂载
+	if len(pod.Volumes) != 1 || len(pod.InitContainers[0].VolumeMounts) != 1 {
+		t.Errorf("without CA only the workspace volume is expected: %+v", pod.Volumes)
+	}
+}
+
+func TestBuildJobRejectsBadInput(t *testing.T) {
+	for name, mutate := range map[string]func(*Run){
+		"bad context path":    func(r *Run) { r.ContextPath = "../etc" },
+		"absolute context":    func(r *Run) { r.ContextPath = "/etc" },
+		"bad dockerfile path": func(r *Run) { r.Dockerfile = "../../x" },
+		"bad build arg name":  func(r *Run) { r.BuildArgs = map[string]string{"bad name": "x"} },
+		"bad repo":            func(r *Run) { r.RepoURL = "git@github.com:o/r.git" },
+		"bad ref":             func(r *Run) { r.Ref = "a;b" },
+	} {
+		r := appRun()
+		mutate(&r)
+		if _, err := buildJob(r, testCfg()); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
 	}
 }
 
@@ -218,5 +310,157 @@ func TestLastErrorMaven(t *testing.T) {
 	// 空的 [ERROR] 行要跳过
 	if got := lastError("BUILD FAILURE\n[ERROR] \n[ERROR] real cause\n"); got != "[ERROR] real cause" {
 		t.Errorf("must skip empty [ERROR] lines, got %q", got)
+	}
+}
+
+func podWith(init, main []corev1.ContainerStatus) *corev1.Pod {
+	return &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: init, ContainerStatuses: main}}
+}
+
+func terminated(name string, code int32, reason string) corev1.ContainerStatus {
+	return corev1.ContainerStatus{Name: name, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: code, Reason: reason}}}
+}
+
+func TestFailedStep(t *testing.T) {
+	if n, _, _ := failedStep(nil); n != "" {
+		t.Error("nil pod has no failed step")
+	}
+	p := podWith([]corev1.ContainerStatus{terminated("git", 0, "Completed"), terminated("script", 2, "Error")}, []corev1.ContainerStatus{{Name: "kaniko"}})
+	if n, c, _ := failedStep(p); n != "script" || c != 2 {
+		t.Errorf("got %s %d", n, c)
+	}
+	if n, c, r := failedStep(podWith([]corev1.ContainerStatus{terminated("git", 0, "Completed"), terminated("script", 0, "Completed")}, []corev1.ContainerStatus{terminated("kaniko", 1, "Error")})); n != "kaniko" || c != 1 || r != "Error" {
+		t.Errorf("main container failure: %s %d %s", n, c, r)
+	}
+	if n, _, r := failedStep(podWith([]corev1.ContainerStatus{terminated("script", 137, "OOMKilled")}, nil)); n != "script" || r != "OOMKilled" {
+		t.Errorf("oom: %s %s", n, r)
+	}
+}
+
+func TestPullProblem(t *testing.T) {
+	waiting := func(name, reason string) corev1.ContainerStatus {
+		return corev1.ContainerStatus{Name: name, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: "back-off pulling image"}}}
+	}
+	if got := pullProblem(podWith([]corev1.ContainerStatus{waiting("script", "ImagePullBackOff")}, nil)); !strings.Contains(got, `step "script"`) || !strings.Contains(got, "ImagePullBackOff") {
+		t.Errorf("got %q", got)
+	}
+	if pullProblem(podWith([]corev1.ContainerStatus{waiting("script", "PodInitializing")}, nil)) != "" {
+		t.Error("normal waiting states are not problems")
+	}
+	if pullProblem(podWith(nil, nil)) != "" {
+		t.Error("empty pod has no problem")
+	}
+}
+
+func TestFailureMessage(t *testing.T) {
+	scriptFailed := podWith([]corev1.ContainerStatus{terminated("git", 0, "Completed"), terminated("script", 1, "Error")}, nil)
+	mvn := "[INFO] BUILD FAILURE\n[ERROR] Failed to execute goal compile: Compilation failure\n"
+	got := failureMessage(scriptFailed, "BackoffLimitExceeded: x", map[string]string{"script": mvn}, "=== step: script ===\n"+mvn)
+	if got != `build failed at step "script" (exit code 1) — [ERROR] Failed to execute goal compile: Compilation failure` {
+		t.Errorf("maven script failure: %q", got)
+	}
+	// 脚本既没有 Error:/fatal:/[ERROR],就用那一步的最后一行
+	got = failureMessage(scriptFailed, "x", map[string]string{"script": "npm ERR! missing script: build\n"}, "")
+	if got != `build failed at step "script" (exit code 1) — npm ERR! missing script: build` {
+		t.Errorf("fallback to last line: %q", got)
+	}
+	// 拉源码失败
+	gitFailed := podWith([]corev1.ContainerStatus{terminated("git", 128, "Error")}, nil)
+	got = failureMessage(gitFailed, "x", map[string]string{"git": "fatal: couldn't find remote ref nope\n"}, "")
+	if got != `build failed at step "checkout" (exit code 128) — fatal: couldn't find remote ref nope` {
+		t.Errorf("git failure: %q", got)
+	}
+	// 内存不足
+	oom := podWith([]corev1.ContainerStatus{terminated("script", 137, "OOMKilled")}, nil)
+	if got := failureMessage(oom, "x", map[string]string{"script": "Killed\n"}, ""); !strings.Contains(got, "OOMKilled") || !strings.Contains(got, "137") {
+		t.Errorf("oom: %q", got)
+	}
+	// 超时
+	if got := failureMessage(scriptFailed, "DeadlineExceeded: Job was active longer than specified deadline", nil, ""); !strings.HasPrefix(got, "build timed out") {
+		t.Errorf("timeout: %q", got)
+	}
+	// 没有 Pod 信息:退回到 Job 的原因
+	if got := failureMessage(nil, "BackoffLimitExceeded: x", nil, "Error: boom\n"); got != "build failed: BackoffLimitExceeded: x — Error: boom" {
+		t.Errorf("no pod: %q", got)
+	}
+}
+
+func TestLastLineAndGitFatal(t *testing.T) {
+	if lastLine("a\n\nb \n\n") != "b" || lastLine("") != "" {
+		t.Error("lastLine")
+	}
+	if got := lastError("INFO x\nfatal: couldn't find remote ref nope\n"); got != "fatal: couldn't find remote ref nope" {
+		t.Errorf("git fatal: %q", got)
+	}
+}
+
+func TestEffectiveProfile(t *testing.T) {
+	if effectiveProfile("dev", "prod") != "dev" || effectiveProfile("", "prod") != "prod" || effectiveProfile("", "") != "" {
+		t.Error("requested profile wins, otherwise the app default")
+	}
+}
+
+func TestNormalizeApp(t *testing.T) {
+	ok := App{Name: "a", Script: "echo hi", Profile: "prod"}
+	if msg := normalizeApp(&ok); msg != "" || ok.Dockerfile != "Dockerfile" {
+		t.Errorf("valid inline app: %q %q", msg, ok.Dockerfile)
+	}
+	if msg := normalizeApp(&App{ScriptPath: "ci/build.sh", Dockerfile: "docker/Dockerfile.prod"}); msg != "" {
+		t.Errorf("valid script_path app: %q", msg)
+	}
+	for name, a := range map[string]App{
+		"neither script nor path": {},
+		"both script and path":    {Script: "x", ScriptPath: "y.sh"},
+		"absolute script path":    {ScriptPath: "/etc/x.sh"},
+		"traversal script path":   {ScriptPath: "../x.sh"},
+		"space in script path":    {ScriptPath: "my build.sh"},
+		"traversal dockerfile":    {Script: "x", Dockerfile: "../Dockerfile"},
+		"bad profile":             {Script: "x", Profile: "a b"},
+		"script too large":        {Script: strings.Repeat("x", maxScriptBytes+1)},
+	} {
+		if msg := normalizeApp(&a); msg == "" {
+			t.Errorf("%s: expected a validation error", name)
+		}
+	}
+}
+
+func TestNormalizeBuilder(t *testing.T) {
+	base := func() Builder { return Builder{Name: "b", Service: "s", RepoURL: "https://github.com/o/r.git"} }
+	b := base()
+	if msg := normalizeBuilder(&b); msg != "" || b.Dockerfile != "Dockerfile" || b.Ref != "master" || b.ContextPath != "." {
+		t.Errorf("legacy builder defaults: %q %+v", msg, b)
+	}
+	b = base()
+	b.App, b.Image = "go-app", "golang:1.24-alpine"
+	if msg := normalizeBuilder(&b); msg != "" {
+		t.Errorf("builder with app: %q", msg)
+	}
+	for name, mutate := range map[string]func(*Builder){
+		"app without image":           func(b *Builder) { b.App = "go-app" },
+		"app with its own dockerfile": func(b *Builder) { b.App, b.Image, b.Dockerfile = "go-app", "golang:1.24", "Dockerfile" },
+		"image without app":           func(b *Builder) { b.Image = "golang:1.24" },
+		"bad image reference":         func(b *Builder) { b.App, b.Image = "go-app", "bad image!" },
+		"bad context path":            func(b *Builder) { b.ContextPath = "../x" },
+		"bad legacy dockerfile":       func(b *Builder) { b.Dockerfile = "../Dockerfile" },
+		"non-http repo":               func(b *Builder) { b.RepoURL = "git@github.com:o/r.git" },
+	} {
+		b := base()
+		mutate(&b)
+		if msg := normalizeBuilder(&b); msg == "" {
+			t.Errorf("%s: expected a validation error", name)
+		}
+	}
+}
+
+func TestValidRelPath(t *testing.T) {
+	for _, ok := range []string{"Dockerfile", "ci/build.sh", "docker/Dockerfile.prod", "a-b_c/d.e"} {
+		if !validRelPath(ok) {
+			t.Errorf("%q should be valid", ok)
+		}
+	}
+	for _, bad := range []string{"", "/abs", "../x", "a/../b", "a b", "a\tb", "a\nb"} {
+		if validRelPath(bad) {
+			t.Errorf("%q should be invalid", bad)
+		}
 	}
 }

@@ -115,6 +115,7 @@ func main() {
 		registryPush:  getenv("REGISTRY_PUSH_HOST", "registry.deployer-build.svc:5000"),
 		registryPull:  getenv("REGISTRY_PULL_HOST", "localhost:30500"),
 		kanikoImage:   getenv("KANIKO_IMAGE", "gcr.io/kaniko-project/executor:v1.23.2"),
+		gitImage:      getenv("GIT_IMAGE", "mirror.gcr.io/alpine/git:latest"),
 		caConfigMap:   getenv("BUILD_CA_CONFIGMAP", ""),
 		buildTimeout:  getDuration("BUILD_TIMEOUT", 15*time.Minute),
 		deployTimeout: getDuration("DEPLOY_TIMEOUT", 10*time.Minute),

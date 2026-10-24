@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -10,6 +11,12 @@ import (
 )
 
 func (a *API) pipelineRoutes(m *http.ServeMux) {
+	m.HandleFunc("POST /v1/apps", a.createApp)
+	m.HandleFunc("GET /v1/apps", a.listApps)
+	m.HandleFunc("GET /v1/apps/{name}", a.getApp)
+	m.HandleFunc("PUT /v1/apps/{name}", a.updateApp)
+	m.HandleFunc("DELETE /v1/apps/{name}", a.deleteApp)
+
 	m.HandleFunc("POST /v1/builders", a.createBuilder)
 	m.HandleFunc("GET /v1/builders", a.listBuilders)
 	m.HandleFunc("GET /v1/builders/{name}", a.getBuilder)
@@ -39,6 +46,115 @@ func conflictOnFK(w http.ResponseWriter, err error, msg string) bool {
 	return false
 }
 
+var imageRefRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9._/-]*)(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?$`)
+
+var profileRe = regexp.MustCompile(`^[A-Za-z0-9._-]{0,63}$`)
+
+// validRelPath 校验"相对构建目录的路径":不能为绝对路径、不能含 ..、不能含空白和控制字符。
+func validRelPath(p string) bool {
+	if p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, "..") {
+		return false
+	}
+	for _, r := range p {
+		if r <= ' ' || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+const maxScriptBytes = 64 << 10
+
+func normalizeApp(a *App) string {
+	if a.Dockerfile == "" {
+		a.Dockerfile = "Dockerfile"
+	}
+	if !validRelPath(a.Dockerfile) {
+		return "dockerfile must be a relative path inside the build context (no .., no spaces)"
+	}
+	if (a.Script == "") == (a.ScriptPath == "") {
+		return "exactly one of script (inline) and script_path (a file in the repo) is required"
+	}
+	if len(a.Script) > maxScriptBytes {
+		return "script is too large (max 64KB); put it in the repo and use script_path instead"
+	}
+	if a.ScriptPath != "" && !validRelPath(a.ScriptPath) {
+		return "script_path must be a relative path inside the build context (no .., no spaces)"
+	}
+	if !profileRe.MatchString(a.Profile) {
+		return "profile may only contain [A-Za-z0-9._-], max 63 characters"
+	}
+	return ""
+}
+
+func (a *API) createApp(w http.ResponseWriter, r *http.Request) {
+	var in App
+	if !decode(w, r, &in) || !validName(w, "app", in.Name, 63) {
+		return
+	}
+	if msg := normalizeApp(&in); msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
+		return
+	}
+	if err := a.store.CreateApp(r.Context(), in); err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, in)
+}
+
+func (a *API) listApps(w http.ResponseWriter, r *http.Request) {
+	v, err := a.store.ListApps(r.Context())
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+func (a *API) getApp(w http.ResponseWriter, r *http.Request) {
+	v, err := a.store.GetApp(r.Context(), r.PathValue("name"))
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+func (a *API) updateApp(w http.ResponseWriter, r *http.Request) {
+	var in App
+	if !decode(w, r, &in) {
+		return
+	}
+	name := r.PathValue("name")
+	if in.Name != "" && in.Name != name {
+		writeErr(w, http.StatusBadRequest, "app name cannot be changed")
+		return
+	}
+	in.Name = name
+	if msg := normalizeApp(&in); msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
+		return
+	}
+	if err := a.store.UpdateApp(r.Context(), in); err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, in)
+}
+
+func (a *API) deleteApp(w http.ResponseWriter, r *http.Request) {
+	err := a.store.DeleteApp(r.Context(), r.PathValue("name"))
+	if err != nil && conflictOnFK(w, err, "app is referenced by builders; it cannot be deleted") {
+		return
+	}
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func normalizeBuilder(b *Builder) string {
 	if b.Ref == "" {
 		b.Ref = "master"
@@ -46,13 +162,36 @@ func normalizeBuilder(b *Builder) string {
 	if b.ContextPath == "" {
 		b.ContextPath = "."
 	}
-	if b.Dockerfile == "" {
-		b.Dockerfile = "Dockerfile"
+	if b.App != "" {
+		// 有 app:脚本在构建环境镜像里运行,Dockerfile 来自 app
+		if b.Image == "" {
+			return "image (the build environment the script runs in, e.g. a maven or golang image) is required when app is set"
+		}
+		if b.Dockerfile != "" {
+			return "dockerfile must be empty when app is set: the app defines the Dockerfile"
+		}
+		if !imageRefRe.MatchString(b.Image) {
+			return "invalid image reference: " + b.Image
+		}
+	} else {
+		// 没有 app:老式构建器,只用 Dockerfile 构建,没有构建脚本
+		if b.Image != "" {
+			return "image is only used together with app (it is the environment the app's build script runs in)"
+		}
+		if b.Dockerfile == "" {
+			b.Dockerfile = "Dockerfile"
+		}
+		if !validRelPath(b.Dockerfile) {
+			return "dockerfile must be a relative path inside the build context (no .., no spaces)"
+		}
+	}
+	if !validRelPath(strings.TrimPrefix(b.ContextPath, "./")) && b.ContextPath != "." {
+		return "context_path must be a relative path inside the repo (no .., no spaces)"
 	}
 	if b.RepoURL == "" {
 		return "repo_url is required"
 	}
-	if _, err := gitContext(b.RepoURL, b.Ref); err != nil { // 同时校验 repo_url 和 ref
+	if err := validateRepoRef(b.RepoURL, b.Ref); err != nil { // 同时校验 repo_url 和 ref
 		return err.Error()
 	}
 	for k := range b.BuildArgs {
@@ -228,6 +367,7 @@ func (a *API) createRun(w http.ResponseWriter, r *http.Request) {
 		Builder  string `json:"builder"`
 		Env      string `json:"env"`
 		Ref      string `json:"ref"`
+		Profile  string `json:"profile"` // 不填则用 builder 引用的 app 的默认 profile
 		Replicas *int   `json:"replicas"`
 	}
 	if !decode(w, r, &in) {
@@ -241,13 +381,17 @@ func (a *API) createRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "replicas must be 0..50")
 		return
 	}
+	if !profileRe.MatchString(in.Profile) {
+		writeErr(w, http.StatusBadRequest, "profile may only contain [A-Za-z0-9._-], max 63 characters")
+		return
+	}
 	if in.Ref != "" {
-		if _, err := gitContext("https://example.invalid/x.git", in.Ref); err != nil {
+		if err := validateRepoRef("https://example.invalid/x.git", in.Ref); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
-	run, err := a.store.CreateRun(r.Context(), actor(r), r.PathValue("name"), in.Builder, in.Env, in.Ref, in.Replicas)
+	run, err := a.store.CreateRun(r.Context(), actor(r), r.PathValue("name"), in.Builder, in.Env, in.Ref, in.Profile, in.Replicas)
 	if err != nil {
 		a.fail(w, err)
 		return
