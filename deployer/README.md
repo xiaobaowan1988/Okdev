@@ -125,51 +125,57 @@ curl -X POST $A/v1/runs/1/cancel   # 取消
   **修复后的实测**:同时提交 3 次,每次都是同一时刻只有 1 个构建 Job,后提交的显示 `queued: waiting for run N`,两个依次 `succeeded`(间隔约 5 秒,即前一个结束后下一个才开始),最终环境里是编号更大的、部署历史顺序与提交顺序一致;
   不同环境同时提交仍然并行(2 个 Job 同时构建);取消排在前面的运行后排队的接着开始;前面的运行失败后排队的不会被卡住;排队中途重启 deployer,队列仍然正确(它是从数据库推导的)。
   代价:同一环境同一服务的连续运行变慢(依次各约 50 秒);排在前面的运行如果卡住(构建最长 15 分钟、部署最长 10 分钟),后面的都得等它超时或被取消。
-## 自定义构建脚本、Dockerfile 和 profile(都在 builder 上)
+## 自定义构建脚本、Dockerfile 和 profile(都在 builder 上,内容存 MySQL)
 不用多阶段 Dockerfile:**先跑一段你自己的构建脚本**(编译、`mvn package`、`npm run build` 都行),产物留在工作目录里,**再用单阶段 Dockerfile 把产物打进镜像**。
-这些配置都是 `builder` 的字段(和 Zadig 一样:构建配置挂在服务的"构建"下面,没有单独的"应用"层;`service` 不变)。曾经有过单独的 `app` 表,已经去掉,
-升级时 deployer 启动会自动把每个 builder 引用的 app 的脚本、Dockerfile、profile 复制进 builder,再删掉 `app` 表。
+**脚本和 Dockerfile 的内容都存在数据库里,代码库里不放**(代码库只有源码)。它们是 `builder` 的字段(和 Zadig 一样:构建配置挂在服务的"构建"下面;`service` 不变)。
+曾经有过单独的 `app` 表和"只存路径"的做法,都已去掉:升级时 deployer 启动会把 app 的脚本复制进 builder 并删掉 `app` 表;
+**原来只存了路径的 Dockerfile 无法自动迁移,需要重新登记内容**(`register.sh` 就是干这个的),没有 Dockerfile 的 builder 创建运行时返回 400。
 
 | `builder` 字段 | 含义 |
 |---|---|
-| `script` | 内联构建脚本(存在数据库里,最大 64KB);和 `script_path` 二选一 |
-| `script_path` | 仓库里的构建脚本,相对 `context_path` |
+| `dockerfile` | **Dockerfile 的内容**(必填,最大 64KB),单阶段,只负责把产物打进镜像 |
+| `script` | **构建脚本的内容**(可选,最大 64KB)。不填就不跑脚本,Dockerfile 直接用仓库里的源码 |
 | `image` | **构建环境镜像**:脚本在这里面运行(如 `maven:3.9-eclipse-temurin-21`)。配了脚本时必填;没配脚本时不能填 |
-| `dockerfile` | 相对 `context_path`,默认 `Dockerfile`,单阶段,只负责把产物打进镜像 |
 | `profile` | 默认 profile,运行时可以覆盖 |
-| 都不配脚本 | 只有 `git` → `kaniko`,直接用 Dockerfile 构建(老行为) |
+| `repo_url` / `ref` / `context_path` | 源码在哪;脚本的工作目录和 Docker 构建上下文都是 `context_path` |
 
 ```bash
-# 仓库里的脚本 + Maven profile
-curl -X POST $A/v1/builders -d '{"name":"java-maven","service":"java-api","repo_url":"<仓库>","context_path":"src/java-maven","script_path":"ci/build.sh","image":"mirror.gcr.io/library/maven:3.9-eclipse-temurin-21","profile":"dev"}'
-# 内联脚本
-curl -X POST $A/v1/builders -d '{"name":"java-plain","service":"java-api","repo_url":"<仓库>","context_path":"src/java-plain","script":"mkdir -p out && javac -d out src/*.java && ...","image":"mirror.gcr.io/library/eclipse-temurin:21-jdk"}'
+# examples/ 里有三套(脚本 + Dockerfile),register.sh 把它们的内容登记成 builder(已存在就更新)
+A=http://127.0.0.1:18080 ./register.sh
+# 手工登记:用 jq 把文件内容放进 JSON
+curl -X POST $A/v1/builders -d "$(jq -n --rawfile df Dockerfile --rawfile sc build.sh \
+  '{name:"java-maven",service:"java-api",repo_url:"<仓库>",context_path:"src/java-maven",
+    image:"mirror.gcr.io/library/maven:3.9-eclipse-temurin-21",profile:"dev",dockerfile:$df,script:$sc}')"
 curl -X POST $A/v1/pipelines/build-and-deploy/runs -d '{"builder":"java-maven","env":"dev5","profile":"prod"}'   # 本次用 prod
+curl $A/v1/runs/1        # 单个运行里有 script / dockerfile:创建这次运行时 builder 里内容的快照(列表接口不带)
 ```
 
+**每次运行会快照脚本和 Dockerfile**:创建运行时把当时 builder 里的内容复制进 `pipeline_run`,所以之后修改 builder 不影响已排队的运行,
+也能事后查到某次运行用的是哪一版。(这一条只有逻辑上的保证和读取验证,没专门做"排队时改 builder"的集群测试。)
+
 **一次构建在一个 Pod 里按顺序做三步**(共用一个 emptyDir `/workspace`):
-1. `git`(init 容器):把 `ref` 拉到 `/workspace`。
-2. `script`(init 容器,builder 配了脚本才有):在 builder 的 `image` 里,**工作目录是 `context_path`**,运行脚本;非 0 退出 → 构建失败,不会进入打镜像。
-   内联脚本以 `sh -ec` 运行;`script_path` 的脚本如果有可执行权限就按它的 shebang 运行,否则用 `sh`。
-3. `kaniko`:上下文就是 `context_path`(脚本产物也在里面),按 builder 的 Dockerfile 打单阶段镜像并推送。
+1. `git`(init 容器):把 `ref` 拉到 `/workspace`,再把脚本和 Dockerfile 的内容写成文件。
+2. `script`(init 容器,builder 配了脚本才有):在 builder 的 `image` 里,**工作目录是 `context_path`**,以 `sh -e` 运行脚本;非 0 退出 → 构建失败,不会进入打镜像。
+   脚本和 Dockerfile 的内容由第 1 步写进共享目录 `/workspace/.deployer/`(通过环境变量 + `printf '%s'`,不拼进命令),不会和仓库里的文件冲突。
+3. `kaniko`:上下文就是 `context_path`(脚本产物也在里面),用库里的 Dockerfile 打单阶段镜像并推送。
 
 **脚本能用的环境变量**(执行器注入,**覆盖** builder 里同名的 `build_args`;builder 的 `build_args` 也会作为环境变量给脚本,同时作为 `--build-arg` 给 Dockerfile):
 `VERSION`(`r<运行号>`)、`PROFILE`、`GIT_REF`、`SERVICE`、`DEPLOY_ENV`、`WORKSPACE`(上下文目录)、`BUILD_EXTRA_CA_FILE`(见下)。Dockerfile 里用 `ARG VERSION`、`ARG PROFILE` 接。
 
 **沙箱里的 CA**:出口 HTTPS 被中间人,git 用 `/etc/build-ca/build-ca.crt`;JDK 自带信任库不认它,所以 `deploy-build.sh` 还会放一个只含沙箱网关根证书的 `extra-ca.crt`,脚本可以用 `$BUILD_EXTRA_CA_FILE` 导入自己的信任库
-(见 fork 里 `src/java-maven/ci/build.sh`)。正常环境没有这个问题,变量指向的文件不存在时脚本里跳过即可。
+(见 `examples/java-maven/build.sh`)。正常环境没有这个问题,变量指向的文件不存在时脚本里跳过即可。
 
-**没配脚本的 builder**:只有 `git` → `kaniko`,没有脚本步骤。
+**没配脚本的 builder**:只有 `git` → `kaniko`,没有脚本步骤(Dockerfile 内容照样来自数据库)。
 **失败信息按步骤给**:`message` 形如 `build failed at step "script" (exit code 1) — [ERROR] ...`;日志按步骤分段(`=== step: checkout|script|image ===`);构建镜像拉不下来(`ImagePullBackOff`)会尽早失败,不用等满超时。
 
-fork 里的三个示例(`src/api`、`src/java-plain`、`src/java-maven`)都是这个模式:Dockerfile 只有一个 `FROM` + `COPY`。
+示例见 `examples/`(`api`、`java-plain`、`java-maven`):Dockerfile 只有一个 `FROM` + `COPY`;fork 里只剩源码。
 
 **实测**(本集群,`build-and-deploy`,三个运行同时提交):
 | 运行 | builder | profile | 结果 |
 |---|---|---|---|
-| 43 | `api-main`(仓库脚本 `ci/build.sh`,go 编译) | 未指定 → builder 默认 `prod` | 成功,dev3 响应 `{"profile":"prod","version":"r43"}` |
+| 43 | `api-main`(go 编译) | 未指定 → builder 默认 `prod` | 成功,dev3 响应 `{"profile":"prod","version":"r43"}` |
 | 44 | `java-plain`(**内联脚本** javac+jar) | 未指定 → 默认 `default` | 成功,dev6 响应 `{"profile":"default","version":"r44"}` |
-| 45 | `java-maven`(`ci/build.sh` → `mvn -P<profile>`,含 CA 导入) | 运行时覆盖 `prod`(builder 默认是 `dev`) | 成功,dev7 响应 `{"profile":"prod","greeting":"hello from prod","version":"r45"}`:Maven profile 真的进了 jar |
+| 45 | `java-maven`(`mvn -P<profile>`,含 CA 导入) | 运行时覆盖 `prod`(builder 默认是 `dev`) | 成功,dev7 响应 `{"profile":"prod","greeting":"hello from prod","version":"r45"}`:Maven profile 真的进了 jar |
 
 失败路径(只构建的流水线,每个都 `failed`,环境不受影响,Job 已清理),`message` 直接指出哪一步、为什么:
 - 脚本 `exit 3` → `build failed at step "script" (exit code 3) — boom`
@@ -178,9 +184,9 @@ fork 里的三个示例(`src/api`、`src/java-plain`、`src/java-maven`)都是�
 - 构建环境镜像不存在 → `build cannot start: step "script": ImagePullBackOff ...`(很快失败,不用等满 15 分钟)
 
 **这一节没验证的**:
-- **没配脚本的 builder(只有 `git` → `kaniko`)只有单测**,没有在集群里再跑一遍:fork 里的示例 Dockerfile 都已改成单阶段、依赖脚本产物,没有现成的"只用 Dockerfile"示例可跑。
+- **没配脚本的 builder(只有 `git` → `kaniko`)只有单测**,没有在集群里再跑一遍:示例都依赖脚本产物,没有现成的"只用 Dockerfile"示例可跑。
 - **`build-ca` ConfigMap 不存在时是否照常启动**没有实测(卷是 optional,但 kaniko 容器是用 `subPath` 挂载的,可能卡住 Pod 启动)。`deploy-build.sh` 会创建它,正常使用不受影响;在没有 CA 的环境里部署前请先实测或把 `BUILD_CA_CONFIGMAP` 留空(留空时不挂载)。
-- 脚本和构建 Pod 一样以 root 运行、能访问外网;脚本是**任意代码执行**,谁能创建 builder 谁就能在集群里跑代码(接口目前没有鉴权)。构建 Pod 没有 ServiceAccount token,但没做网络隔离。
+- 脚本内容和 Dockerfile 内容会出现在构建 Pod 的环境变量里(给 git 步骤用),**不要往脚本里写密钥**;脚本和构建 Pod 一样以 root 运行、能访问外网;脚本是**任意代码执行**,谁能创建 builder 谁就能在集群里跑代码(接口目前没有鉴权)。构建 Pod 没有 ServiceAccount token,但没做网络隔离。
 - 没有构建缓存(Maven 依赖每次重新下载);脚本步骤的内存/CPU 限制沿用固定值,不能按 builder 调。
 - 测试里留下的 builder(`api-badref`、`api-baddockerfile`、`t-fail`、`t-noscript`、`t-nodocker`、`t-badimage`)因为运行记录外键删不掉,同上。
 

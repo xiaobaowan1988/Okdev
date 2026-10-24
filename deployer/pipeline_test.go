@@ -46,7 +46,7 @@ func envMap(c *corev1.Container) map[string]string {
 
 func appRun() Run {
 	return Run{ID: 7, Service: "api", Env: "dev3", Ref: "master", RepoURL: "https://github.com/o/r.git", ContextPath: "src/api",
-		Dockerfile: "Dockerfile.pkg", Profile: "prod", BuilderImage: "golang:1.24-alpine", Script: "go build -o dist/api .",
+		Dockerfile: "FROM scratch\nCOPY dist/api /api\n", Profile: "prod", BuilderImage: "golang:1.24-alpine", Script: "echo \"$HOME\" $(date)\ngo build -o dist/api .",
 		BuildArgs: map[string]string{"FOO": "bar", "VERSION": "user-supplied", "PROFILE": "user-profile"}}
 }
 
@@ -73,9 +73,12 @@ func TestBuildJobWithScript(t *testing.T) {
 	if script.WorkingDir != "/workspace/src/api" {
 		t.Errorf("script must run in the context dir, got %q", script.WorkingDir)
 	}
-	// 内联脚本原样作为 sh -e 的参数
-	if strings.Join(script.Command, "|") != "sh|-ec|go build -o dist/api ." {
+	// 脚本内容存在数据库里:由 git 步骤写成文件,script 步骤以 sh -e 运行它(内容不进命令行,也不进脚本容器的环境变量)
+	if strings.Join(script.Command, "|") != "sh|-e|/workspace/.deployer/build.sh" {
 		t.Errorf("script command: %v", script.Command)
+	}
+	if _, ok := envMap(script)["BUILD_SCRIPT_TEXT"]; ok {
+		t.Error("script content must only be visible to the git step that writes it")
 	}
 	// 环境变量:保留名由执行器注入,覆盖用户同名参数;用户参数同时可见
 	env := envMap(script)
@@ -87,7 +90,7 @@ func TestBuildJobWithScript(t *testing.T) {
 	}
 	// kaniko:上下文是共享目录,Dockerfile 用绝对路径,构建参数与脚本环境一致
 	args := strings.Join(kaniko.Args, " ")
-	for _, want := range []string{"--context=dir:///workspace/src/api", "--dockerfile=/workspace/src/api/Dockerfile.pkg",
+	for _, want := range []string{"--context=dir:///workspace/src/api", "--dockerfile=/workspace/.deployer/Dockerfile",
 		"--destination=registry.deployer-build.svc:5000/api:r7", "--insecure", "--build-arg=FOO=bar", "--build-arg=PROFILE=prod",
 		"--build-arg=VERSION=r7", "--build-arg=GIT_REF=master"} {
 		if !strings.Contains(args, want) {
@@ -100,6 +103,15 @@ func TestBuildJobWithScript(t *testing.T) {
 	// git 步骤的仓库和 ref 通过环境变量传入(不拼进脚本),避免注入
 	if e := envMap(git); e["REPO"] != "https://github.com/o/r.git" || e["REF"] != "master" || strings.Contains(git.Command[2], "o/r.git") {
 		t.Errorf("git env/command: %v / %q", e, git.Command[2])
+	}
+	// Dockerfile 和脚本的内容经环境变量传给 git 步骤,由 printf '%s' 写文件(不拼进命令,避免引号/$ 注入)
+	ge := envMap(git)
+	if ge["BUILD_DOCKERFILE_TEXT"] != appRun().Dockerfile || ge["BUILD_SCRIPT_TEXT"] != appRun().Script {
+		t.Errorf("recipe content env: %v", ge)
+	}
+	if strings.Contains(git.Command[2], "COPY dist") || strings.Contains(git.Command[2], "go build") ||
+		!strings.Contains(git.Command[2], `printf '%s\n' "$BUILD_DOCKERFILE_TEXT" > /workspace/.deployer/Dockerfile`) {
+		t.Errorf("git command should only reference the env vars: %q", git.Command[2])
 	}
 	if *job.Spec.ActiveDeadlineSeconds != 900 || *job.Spec.BackoffLimit != 0 {
 		t.Errorf("bad deadline/backoff: %d %d", *job.Spec.ActiveDeadlineSeconds, *job.Spec.BackoffLimit)
@@ -115,23 +127,9 @@ func TestBuildJobWithScript(t *testing.T) {
 	}
 }
 
-// 仓库里的脚本:用环境变量传路径(不拼进命令),有可执行权限按 shebang 运行,否则用 sh。
-func TestBuildJobScriptPath(t *testing.T) {
-	r := appRun()
-	r.Script, r.ScriptPath = "", "ci/build.sh"
-	job, err := buildJob(r, testCfg())
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := container(job.Spec.Template.Spec.InitContainers, "script")
-	if envMap(script)["BUILD_SCRIPT_PATH"] != "ci/build.sh" || strings.Contains(script.Command[2], "ci/build.sh") || !strings.Contains(script.Command[2], `[ -x "$BUILD_SCRIPT_PATH" ]`) {
-		t.Errorf("script path handling: env=%v cmd=%q", envMap(script), script.Command[2])
-	}
-}
-
-// 没配脚本:老式构建器,只有 git → kaniko,用构建器自己的 Dockerfile,没有 script 步骤。
+// 没配脚本:只有 git → kaniko,Dockerfile 内容照样来自数据库,没有 script 步骤。
 func TestBuildJobLegacyNoApp(t *testing.T) {
-	r := Run{ID: 3, Service: "api", Ref: "master", RepoURL: "https://github.com/o/r.git", ContextPath: ".", Dockerfile: "Dockerfile"}
+	r := Run{ID: 3, Service: "api", Ref: "master", RepoURL: "https://github.com/o/r.git", ContextPath: ".", Dockerfile: "FROM busybox\n"}
 	cfg := testCfg()
 	cfg.caConfigMap = ""
 	job, err := buildJob(r, cfg)
@@ -143,10 +141,13 @@ func TestBuildJobLegacyNoApp(t *testing.T) {
 		t.Fatalf("legacy builder must have only the git step: %+v", pod.InitContainers)
 	}
 	a := strings.Join(pod.Containers[0].Args, " ")
-	if !strings.Contains(a, "--context=dir:///workspace ") || !strings.Contains(a, "--dockerfile=/workspace/Dockerfile ") || strings.Contains(a, "--build-arg=PROFILE") {
+	if !strings.Contains(a, "--context=dir:///workspace ") || !strings.Contains(a, "--dockerfile=/workspace/.deployer/Dockerfile ") || strings.Contains(a, "--build-arg=PROFILE") {
 		t.Errorf("legacy args: %s", a)
 	}
 	// 没配 CA:不挂 CA 卷,git 容器不需要那个挂载
+	if _, ok := envMap(&pod.InitContainers[0])["BUILD_SCRIPT_TEXT"]; ok {
+		t.Error("no script: BUILD_SCRIPT_TEXT must not be set")
+	}
 	if len(pod.Volumes) != 1 || len(pod.InitContainers[0].VolumeMounts) != 1 {
 		t.Errorf("without CA only the workspace volume is expected: %+v", pod.Volumes)
 	}
@@ -154,12 +155,12 @@ func TestBuildJobLegacyNoApp(t *testing.T) {
 
 func TestBuildJobRejectsBadInput(t *testing.T) {
 	for name, mutate := range map[string]func(*Run){
-		"bad context path":    func(r *Run) { r.ContextPath = "../etc" },
-		"absolute context":    func(r *Run) { r.ContextPath = "/etc" },
-		"bad dockerfile path": func(r *Run) { r.Dockerfile = "../../x" },
-		"bad build arg name":  func(r *Run) { r.BuildArgs = map[string]string{"bad name": "x"} },
-		"bad repo":            func(r *Run) { r.RepoURL = "git@github.com:o/r.git" },
-		"bad ref":             func(r *Run) { r.Ref = "a;b" },
+		"bad context path":   func(r *Run) { r.ContextPath = "../etc" },
+		"absolute context":   func(r *Run) { r.ContextPath = "/etc" },
+		"empty dockerfile":   func(r *Run) { r.Dockerfile = "  \n" },
+		"bad build arg name": func(r *Run) { r.BuildArgs = map[string]string{"bad name": "x"} },
+		"bad repo":           func(r *Run) { r.RepoURL = "git@github.com:o/r.git" },
+		"bad ref":            func(r *Run) { r.Ref = "a;b" },
 	} {
 		r := appRun()
 		mutate(&r)
@@ -401,38 +402,30 @@ func TestEffectiveProfile(t *testing.T) {
 }
 
 func TestNormalizeBuilder(t *testing.T) {
-	base := func() Builder { return Builder{Name: "b", Service: "s", RepoURL: "https://github.com/o/r.git"} }
+	base := func() Builder {
+		return Builder{Name: "b", Service: "s", RepoURL: "https://github.com/o/r.git", Dockerfile: "FROM scratch\nCOPY app /app\n"}
+	}
 	b := base()
-	if msg := normalizeBuilder(&b); msg != "" || b.Dockerfile != "Dockerfile" || b.Ref != "master" || b.ContextPath != "." {
+	if msg := normalizeBuilder(&b); msg != "" || b.Ref != "master" || b.ContextPath != "." {
 		t.Errorf("defaults (no script): %q %+v", msg, b)
 	}
-	for name, mutate := range map[string]func(*Builder){
-		"inline script": func(b *Builder) { b.Script, b.Image, b.Profile = "echo hi", "golang:1.24-alpine", "prod" },
-		"script in repo": func(b *Builder) {
-			b.ScriptPath, b.Image, b.Dockerfile = "ci/build.sh", "maven:3.9", "docker/Dockerfile.prod"
-		},
-		"no script, only dockerfile": func(b *Builder) { b.Dockerfile = "Dockerfile.x" },
-	} {
-		b := base()
-		mutate(&b)
-		if msg := normalizeBuilder(&b); msg != "" {
-			t.Errorf("%s should be valid: %q", name, msg)
-		}
+	b = base()
+	b.Script, b.Image, b.Profile = "go build -o app .", "golang:1.24-alpine", "prod"
+	if msg := normalizeBuilder(&b); msg != "" {
+		t.Errorf("builder with script: %q", msg)
 	}
 	for name, mutate := range map[string]func(*Builder){
-		"script without image":      func(b *Builder) { b.Script = "x" },
-		"script_path without image": func(b *Builder) { b.ScriptPath = "ci/b.sh" },
-		"image without script":      func(b *Builder) { b.Image = "golang:1.24" },
-		"both script and path":      func(b *Builder) { b.Script, b.ScriptPath, b.Image = "x", "y.sh", "golang:1.24" },
-		"absolute script path":      func(b *Builder) { b.ScriptPath, b.Image = "/etc/x.sh", "golang:1.24" },
-		"traversal script path":     func(b *Builder) { b.ScriptPath, b.Image = "../x.sh", "golang:1.24" },
-		"space in script path":      func(b *Builder) { b.ScriptPath, b.Image = "my build.sh", "golang:1.24" },
-		"script too large":          func(b *Builder) { b.Script, b.Image = strings.Repeat("x", maxScriptBytes+1), "golang:1.24" },
-		"bad image reference":       func(b *Builder) { b.Script, b.Image = "x", "bad image!" },
-		"bad profile":               func(b *Builder) { b.Script, b.Image, b.Profile = "x", "golang:1.24", "a b" },
-		"traversal dockerfile":      func(b *Builder) { b.Dockerfile = "../Dockerfile" },
-		"bad context path":          func(b *Builder) { b.ContextPath = "../x" },
-		"non-http repo":             func(b *Builder) { b.RepoURL = "git@github.com:o/r.git" },
+		"no dockerfile":        func(b *Builder) { b.Dockerfile = "" },
+		"blank dockerfile":     func(b *Builder) { b.Dockerfile = " \n\t" },
+		"dockerfile too large": func(b *Builder) { b.Dockerfile = strings.Repeat("x", maxScriptBytes+1) },
+		"script without image": func(b *Builder) { b.Script = "x" },
+		"image without script": func(b *Builder) { b.Image = "golang:1.24" },
+		"script too large":     func(b *Builder) { b.Script, b.Image = strings.Repeat("x", maxScriptBytes+1), "golang:1.24" },
+		"bad image reference":  func(b *Builder) { b.Script, b.Image = "x", "bad image!" },
+		"bad profile":          func(b *Builder) { b.Script, b.Image, b.Profile = "x", "golang:1.24", "a b" },
+		"bad context path":     func(b *Builder) { b.ContextPath = "../x" },
+		"non-http repo":        func(b *Builder) { b.RepoURL = "git@github.com:o/r.git" },
+		"bad build arg name":   func(b *Builder) { b.BuildArgs = map[string]string{"bad name": "x"} },
 	} {
 		b := base()
 		mutate(&b)

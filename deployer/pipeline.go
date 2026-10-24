@@ -82,6 +82,18 @@ git fetch -q --depth 1 origin "$REF"
 git checkout -q FETCH_HEAD
 echo "checked out $(git rev-parse --short HEAD) from $REF"`
 
+// 构建脚本和 Dockerfile 的内容存在数据库里,由 git 步骤在拉完源码后写进共享目录(放在 .deployer 里,不会和仓库里的文件冲突)。
+// 内容通过环境变量传入、用 printf 写文件,不拼进命令,避免引号和 $ 带来的注入。
+const (
+	recipeDir      = workspaceDir + "/.deployer"
+	scriptFile     = recipeDir + "/build.sh"
+	dockerfileFile = recipeDir + "/Dockerfile"
+	writeRecipe    = `
+mkdir -p ` + recipeDir + `
+printf '%s\n' "$BUILD_DOCKERFILE_TEXT" > ` + dockerfileFile + `
+if [ -n "${BUILD_SCRIPT_TEXT-}" ]; then printf '%s\n' "$BUILD_SCRIPT_TEXT" > ` + scriptFile + `; fi`
+)
+
 func envVars(m map[string]string) []corev1.EnvVar {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -135,16 +147,12 @@ func buildJob(r Run, c buildConfig) (*batchv1.Job, error) {
 	}
 	scriptEnv["SERVICE"], scriptEnv["DEPLOY_ENV"], scriptEnv["WORKSPACE"], scriptEnv["BUILD_EXTRA_CA_FILE"] = r.Service, r.Env, ctxDir, extraCAFile
 
-	dockerfile := r.Dockerfile
-	if dockerfile == "" {
-		dockerfile = "Dockerfile"
-	}
-	if !validRelPath(dockerfile) {
-		return nil, fmt.Errorf("invalid dockerfile path %q", dockerfile)
+	if strings.TrimSpace(r.Dockerfile) == "" {
+		return nil, fmt.Errorf("run %d has no dockerfile", r.ID)
 	}
 	args := []string{
 		"--context=dir://" + ctxDir,
-		"--dockerfile=" + ctxDir + "/" + dockerfile,
+		"--dockerfile=" + dockerfileFile,
 		"--destination=" + pushImage(c, r),
 		"--insecure", // 集群内仓库是明文 HTTP
 		"--cache=false",
@@ -165,21 +173,18 @@ func buildJob(r Run, c buildConfig) (*batchv1.Job, error) {
 	ws := corev1.VolumeMount{Name: "workspace", MountPath: workspaceDir}
 	caMount := corev1.VolumeMount{Name: "ca", MountPath: caDir, ReadOnly: true}
 
+	gitEnv := []corev1.EnvVar{{Name: "REPO", Value: r.RepoURL}, {Name: "REF", Value: r.Ref}, {Name: "BUILD_DOCKERFILE_TEXT", Value: r.Dockerfile}}
+	if r.Script != "" {
+		gitEnv = append(gitEnv, corev1.EnvVar{Name: "BUILD_SCRIPT_TEXT", Value: r.Script})
+	}
 	inits := []corev1.Container{{
-		Name: "git", Image: c.gitImage, Command: []string{"sh", "-ec", checkoutScript},
-		Env:          []corev1.EnvVar{{Name: "REPO", Value: r.RepoURL}, {Name: "REF", Value: r.Ref}},
-		VolumeMounts: []corev1.VolumeMount{ws, caMount}, Resources: res,
+		Name: "git", Image: c.gitImage, Command: []string{"sh", "-ec", checkoutScript + writeRecipe},
+		Env: gitEnv, VolumeMounts: []corev1.VolumeMount{ws, caMount}, Resources: res,
 	}}
-	if r.Script != "" || r.ScriptPath != "" { // 构建脚本:内联脚本直接作为 sh -e 的参数;仓库里的脚本有可执行权限就按它的 shebang 运行,否则用 sh
-		body := r.Script
-		env := scriptEnv
-		if body == "" {
-			body = `if [ -x "$BUILD_SCRIPT_PATH" ]; then exec "./$BUILD_SCRIPT_PATH"; else exec sh "$BUILD_SCRIPT_PATH"; fi`
-			env["BUILD_SCRIPT_PATH"] = r.ScriptPath
-		}
+	if r.Script != "" { // 构建脚本在构建环境镜像里以 sh -e 运行,工作目录是 context_path,产物留在那里供 Dockerfile 使用
 		inits = append(inits, corev1.Container{
-			Name: "script", Image: r.BuilderImage, WorkingDir: ctxDir, Command: []string{"sh", "-ec", body},
-			Env: envVars(env), VolumeMounts: []corev1.VolumeMount{ws, caMount}, Resources: res,
+			Name: "script", Image: r.BuilderImage, WorkingDir: ctxDir, Command: []string{"sh", "-e", scriptFile},
+			Env: envVars(scriptEnv), VolumeMounts: []corev1.VolumeMount{ws, caMount}, Resources: res,
 		})
 	}
 

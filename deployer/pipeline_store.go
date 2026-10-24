@@ -16,18 +16,17 @@ type Builder struct {
 	Name        string            `json:"name"`
 	Service     string            `json:"service"` // 关联的服务(必填)
 	RepoURL     string            `json:"repo_url"`
-	Ref         string            `json:"ref"`                   // 分支、tag、完整 ref(refs/...)或 commit SHA,运行时可覆盖
-	ContextPath string            `json:"context_path"`          // 仓库里的构建目录:脚本在这里运行,也是 Docker 构建上下文
-	Dockerfile  string            `json:"dockerfile"`            // 相对 context_path,默认 Dockerfile;单阶段,只负责把产物打进镜像
-	Script      string            `json:"script,omitempty"`      // 内联构建脚本(和 script_path 二选一;都空则不跑脚本,只用 Dockerfile 构建)
-	ScriptPath  string            `json:"script_path,omitempty"` // 仓库里的构建脚本,相对 context_path
-	Image       string            `json:"image,omitempty"`       // 构建环境镜像:脚本在这里面运行(有脚本时必填),如 maven、golang 镜像
-	Profile     string            `json:"profile,omitempty"`     // 默认 profile,运行时可覆盖;脚本里是 $PROFILE,Dockerfile 里是 ARG PROFILE
-	BuildArgs   map[string]string `json:"build_args,omitempty"`  // 同时作为脚本的环境变量和 Docker 构建参数
+	Ref         string            `json:"ref"`                  // 分支、tag、完整 ref(refs/...)或 commit SHA,运行时可覆盖
+	ContextPath string            `json:"context_path"`         // 仓库里的构建目录:脚本在这里运行,也是 Docker 构建上下文
+	Dockerfile  string            `json:"dockerfile"`           // Dockerfile 的内容(存在数据库里,必填;单阶段,只负责把产物打进镜像)
+	Script      string            `json:"script,omitempty"`     // 构建脚本的内容(存在数据库里,可选;不填就不跑脚本,Dockerfile 直接用仓库里的源码)
+	Image       string            `json:"image,omitempty"`      // 构建环境镜像:脚本在这里面运行(有脚本时必填),如 maven、golang 镜像
+	Profile     string            `json:"profile,omitempty"`    // 默认 profile,运行时可覆盖;脚本里是 $PROFILE,Dockerfile 里是 ARG PROFILE
+	BuildArgs   map[string]string `json:"build_args,omitempty"` // 同时作为脚本的环境变量和 Docker 构建参数
 }
 
-const builderSelect = `SELECT b.id, b.name, v.name, b.repo_url, b.ref, b.context_path, b.dockerfile,
-  COALESCE(b.script,''), b.script_path, b.image, b.profile, b.build_args
+const builderSelect = `SELECT b.id, b.name, v.name, b.repo_url, b.ref, b.context_path, COALESCE(b.dockerfile_text,''),
+  COALESCE(b.script,''), b.image, b.profile, b.build_args
   FROM builder b JOIN service v ON v.id = b.service_id `
 
 func scanBuilder(r scanner) (int64, Builder, error) {
@@ -35,7 +34,7 @@ func scanBuilder(r scanner) (int64, Builder, error) {
 	var b Builder
 	var args []byte
 	if err := r.Scan(&id, &b.Name, &b.Service, &b.RepoURL, &b.Ref, &b.ContextPath, &b.Dockerfile,
-		&b.Script, &b.ScriptPath, &b.Image, &b.Profile, &args); err != nil {
+		&b.Script, &b.Image, &b.Profile, &args); err != nil {
 		return 0, b, err
 	}
 	if len(args) > 0 {
@@ -65,8 +64,8 @@ func (s *Store) CreateBuilder(ctx context.Context, b Builder) error {
 		return fmt.Errorf("service %q: %w", b.Service, notFound(err))
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO builder(name, service_id, repo_url, ref, context_path, dockerfile, script, script_path, image, profile, build_args) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		b.Name, svcID, b.RepoURL, b.Ref, b.ContextPath, b.Dockerfile, nullStr(b.Script), b.ScriptPath, b.Image, b.Profile, argsJSON(b.BuildArgs))
+		`INSERT INTO builder(name, service_id, repo_url, ref, context_path, dockerfile_text, script, image, profile, build_args) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		b.Name, svcID, b.RepoURL, b.Ref, b.ContextPath, b.Dockerfile, nullStr(b.Script), b.Image, b.Profile, argsJSON(b.BuildArgs))
 	return err
 }
 
@@ -99,8 +98,8 @@ func (s *Store) ListBuilders(ctx context.Context, service string) ([]Builder, er
 // UpdateBuilder 修改构建器(名字和关联的服务不可改:历史运行引用着它;其余字段可以改,只影响之后的运行)。
 func (s *Store) UpdateBuilder(ctx context.Context, b Builder) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE builder SET repo_url=?, ref=?, context_path=?, dockerfile=?, script=?, script_path=?, image=?, profile=?, build_args=? WHERE name=?`,
-		b.RepoURL, b.Ref, b.ContextPath, b.Dockerfile, nullStr(b.Script), b.ScriptPath, b.Image, b.Profile, argsJSON(b.BuildArgs), b.Name)
+		`UPDATE builder SET repo_url=?, ref=?, context_path=?, dockerfile_text=?, script=?, image=?, profile=?, build_args=? WHERE name=?`,
+		b.RepoURL, b.Ref, b.ContextPath, b.Dockerfile, nullStr(b.Script), b.Image, b.Profile, argsJSON(b.BuildArgs), b.Name)
 	if err != nil {
 		return err
 	}
@@ -234,6 +233,8 @@ type Run struct {
 	Env         string     `json:"env"`
 	Ref         string     `json:"ref"`
 	Profile     string     `json:"profile,omitempty"`
+	Script      string     `json:"script,omitempty"`     // 本次运行用的构建脚本内容(创建运行时从 builder 复制的快照;列表接口不返回)
+	Dockerfile  string     `json:"dockerfile,omitempty"` // 本次运行用的 Dockerfile 内容(快照;列表接口不返回)
 	Replicas    *int       `json:"replicas,omitempty"`
 	Status      string     `json:"status"`
 	Image       string     `json:"image,omitempty"`
@@ -251,17 +252,14 @@ type Run struct {
 	Steps           []string          `json:"-"`
 	RepoURL         string            `json:"-"`
 	ContextPath     string            `json:"-"`
-	Dockerfile      string            `json:"-"`
 	BuildArgs       map[string]string `json:"-"`
 	BuilderImage    string            `json:"-"` // 构建环境镜像(有脚本时脚本在这里运行)
-	Script          string            `json:"-"`
-	ScriptPath      string            `json:"-"`
 }
 
 const runSelect = `SELECT r.id, p.name, b.name, v.name, e.name, r.ref, r.replicas, r.status, r.image, COALESCE(r.message,''),
   r.triggered_by, r.created_at, r.started_at, r.finished_at,
   r.cancel_requested, r.job_name, r.deploy_version, r.phase_started_at, p.steps, b.repo_url, b.context_path,
-  b.dockerfile, b.build_args, r.profile, b.image, COALESCE(b.script,''), b.script_path
+  b.build_args, r.profile, b.image, COALESCE(r.script_text,''), COALESCE(r.dockerfile_text,'')
   FROM pipeline_run r JOIN pipeline p ON p.id=r.pipeline_id JOIN builder b ON b.id=r.builder_id
   JOIN service v ON v.id=b.service_id JOIN environment e ON e.id=r.env_id `
 
@@ -272,8 +270,8 @@ func scanRun(r scanner) (Run, error) {
 	var steps, args []byte
 	if err := r.Scan(&x.ID, &x.Pipeline, &x.Builder, &x.Service, &x.Env, &x.Ref, &repl, &x.Status, &x.Image, &x.Message,
 		&x.TriggeredBy, &x.CreatedAt, &started, &finished,
-		&x.CancelRequested, &x.JobName, &x.DeployVersion, &phase, &steps, &x.RepoURL, &x.ContextPath, &x.Dockerfile, &args,
-		&x.Profile, &x.BuilderImage, &x.Script, &x.ScriptPath); err != nil {
+		&x.CancelRequested, &x.JobName, &x.DeployVersion, &phase, &steps, &x.RepoURL, &x.ContextPath, &args,
+		&x.Profile, &x.BuilderImage, &x.Script, &x.Dockerfile); err != nil {
 		return x, err
 	}
 	if repl.Valid {
@@ -299,15 +297,18 @@ func scanRun(r scanner) (Run, error) {
 // CreateRun 创建一次运行:选定 builder 和 env;ref 不填则用 builder 的默认 ref。
 func (s *Store) CreateRun(ctx context.Context, actor, pipeline, builder, env, ref, profile string, replicas *int) (Run, error) {
 	var pID, bID, eID int64
-	var defRef, defProfile string
+	var defRef, defProfile, script, dockerfile string
 	if err := s.db.QueryRowContext(ctx, `SELECT id FROM pipeline WHERE name=?`, pipeline).Scan(&pID); err != nil {
 		return Run{}, fmt.Errorf("pipeline %q: %w", pipeline, notFound(err))
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT id, ref, profile FROM builder WHERE name=?`, builder).Scan(&bID, &defRef, &defProfile); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT id, ref, profile, COALESCE(script,''), COALESCE(dockerfile_text,'') FROM builder WHERE name=?`, builder).Scan(&bID, &defRef, &defProfile, &script, &dockerfile); err != nil {
 		return Run{}, fmt.Errorf("builder %q: %w", builder, notFound(err))
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT id FROM environment WHERE name=?`, env).Scan(&eID); err != nil {
 		return Run{}, fmt.Errorf("env %q: %w", env, notFound(err))
+	}
+	if dockerfile == "" {
+		return Run{}, fmt.Errorf("builder %q has no dockerfile: %w", builder, ErrInvalid)
 	}
 	if ref == "" {
 		ref = defRef
@@ -318,8 +319,8 @@ func (s *Store) CreateRun(ctx context.Context, actor, pipeline, builder, env, re
 		repl = *replicas
 	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO pipeline_run(pipeline_id, builder_id, env_id, ref, profile, replicas, triggered_by) VALUES (?,?,?,?,?,?,?)`,
-		pID, bID, eID, ref, profile, repl, actor)
+		`INSERT INTO pipeline_run(pipeline_id, builder_id, env_id, ref, profile, replicas, triggered_by, script_text, dockerfile_text) VALUES (?,?,?,?,?,?,?,?,?)`,
+		pID, bID, eID, ref, profile, repl, actor, nullStr(script), dockerfile)
 	if err != nil {
 		return Run{}, err
 	}
@@ -360,6 +361,7 @@ func (s *Store) ListRuns(ctx context.Context, f RunFilter) ([]Run, error) {
 		if err != nil {
 			return nil, err
 		}
+		r.Script, r.Dockerfile = "", "" // 列表里不带大文本,看单个运行(GET /v1/runs/{id})才有
 		out = append(out, r)
 	}
 	return out, rows.Err()

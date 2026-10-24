@@ -16,6 +16,7 @@ import (
 var (
 	ErrNotFound = errors.New("not found")
 	ErrConflict = errors.New("version conflict")
+	ErrInvalid  = errors.New("invalid request") // 请求本身没问题但当前数据不允许(如 builder 没配 Dockerfile)
 )
 
 // 期望状态(desired_state/replicas/image)由 API 写入,观测状态(observed_*)由对账循环写入。
@@ -96,7 +97,6 @@ var ddl = []string{
 	  repo_url VARCHAR(255) NOT NULL,
 	  ref VARCHAR(255) NOT NULL DEFAULT 'master',
 	  context_path VARCHAR(255) NOT NULL DEFAULT '.',
-	  dockerfile VARCHAR(255) NOT NULL DEFAULT 'Dockerfile',
 	  build_args JSON NULL,
 	  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	  CONSTRAINT fk_builder_svc FOREIGN KEY (service_id) REFERENCES service(id))`,
@@ -176,19 +176,33 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 		return nil
 	}
-	// 构建器上的构建脚本(script 内联 / script_path 在仓库里,二选一,都空表示只用 Dockerfile 构建)、构建环境镜像和默认 profile
-	for _, c := range [][2]string{
-		{"image", "VARCHAR(255) NOT NULL DEFAULT ''"},
-		{"script", "MEDIUMTEXT NULL"},
-		{"script_path", "VARCHAR(255) NOT NULL DEFAULT ''"},
-		{"profile", "VARCHAR(63) NOT NULL DEFAULT ''"},
+	// 构建脚本和 Dockerfile 的内容存在数据库里(代码库不放):builder 上是当前版本,每次运行创建时再复制一份(script_text/dockerfile_text),
+	// 这样运行之后改 builder 不影响排队中的运行,也能事后查到某次运行用的是哪一版。
+	for _, c := range [][3]string{
+		{"builder", "image", "VARCHAR(255) NOT NULL DEFAULT ''"},
+		{"builder", "script", "MEDIUMTEXT NULL"},
+		{"builder", "dockerfile_text", "MEDIUMTEXT NULL"},
+		{"builder", "profile", "VARCHAR(63) NOT NULL DEFAULT ''"},
+		{"pipeline_run", "profile", "VARCHAR(63) NOT NULL DEFAULT ''"},
+		{"pipeline_run", "script_text", "MEDIUMTEXT NULL"},
+		{"pipeline_run", "dockerfile_text", "MEDIUMTEXT NULL"},
 	} {
-		if err := addColumn("builder", c[0], c[1]); err != nil {
+		if err := addColumn(c[0], c[1], c[2]); err != nil {
 			return err
 		}
 	}
-	if err := addColumn("pipeline_run", "profile", "VARCHAR(63) NOT NULL DEFAULT ''"); err != nil {
-		return err
+	// 已废弃的列:dockerfile / script_path 原来只存仓库里的路径,现在改存内容。
+	dropColumn := func(table, col string) error {
+		var n int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.COLUMNS
+		  WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?`, table, col).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			_, err := conn.ExecContext(ctx, "ALTER TABLE "+table+" DROP COLUMN "+col)
+			return err
+		}
+		return nil
 	}
 	// 老库:曾经有独立的 app 表(构建配方)。把配方复制进引用它的 builder,再删掉 app 表、外键和 app_id 列。
 	var hasApp int
@@ -203,7 +217,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return err
 		}
 		for _, stmt := range []string{
-			`UPDATE builder b JOIN app a ON a.id=b.app_id SET b.script=a.script, b.script_path=a.script_path, b.dockerfile=a.dockerfile, b.profile=a.profile`,
+			`UPDATE builder b JOIN app a ON a.id=b.app_id SET b.script=a.script, b.profile=a.profile`,
 			`ALTER TABLE builder DROP FOREIGN KEY fk_builder_app`,
 			`ALTER TABLE builder DROP COLUMN app_id`,
 			`DROP TABLE IF EXISTS app`,
@@ -214,6 +228,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 			if _, err := conn.ExecContext(ctx, stmt); err != nil {
 				return err
 			}
+		}
+	}
+	for _, c := range [][2]string{{"builder", "dockerfile"}, {"builder", "script_path"}} {
+		if err := dropColumn(c[0], c[1]); err != nil {
+			return err
 		}
 	}
 	// 老库去掉已废弃的 env_group 列(曾用于按 group 分命名空间/AppProject,现统一为一个)

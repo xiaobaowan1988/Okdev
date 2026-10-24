@@ -78,6 +78,8 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusNotFound, "not found")
 	case errors.Is(err, ErrConflict):
 		writeErr(w, http.StatusConflict, "version conflict: the deployment was modified, re-read and retry")
+	case errors.Is(err, ErrInvalid):
+		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.As(err, &me) && me.Number == 1062:
 		writeErr(w, http.StatusConflict, "already exists")
 	default:
@@ -87,7 +89,7 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 }
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<19))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())

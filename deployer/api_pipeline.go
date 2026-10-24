@@ -67,23 +67,17 @@ func normalizeBuilder(b *Builder) string {
 	if b.ContextPath == "" {
 		b.ContextPath = "."
 	}
-	if b.Dockerfile == "" {
-		b.Dockerfile = "Dockerfile"
+	// Dockerfile 和构建脚本的内容都存在数据库里。Dockerfile 必填;脚本可选(不填就不跑脚本)。
+	if strings.TrimSpace(b.Dockerfile) == "" {
+		return "dockerfile (the content of a single-stage Dockerfile) is required"
 	}
-	if !validRelPath(b.Dockerfile) {
-		return "dockerfile must be a relative path inside the build context (no .., no spaces)"
-	}
-	// 构建脚本:内联(script)或仓库里的文件(script_path),都不填表示不跑脚本、只用 Dockerfile 构建
-	if b.Script != "" && b.ScriptPath != "" {
-		return "script (inline) and script_path (a file in the repo) are mutually exclusive"
+	if len(b.Dockerfile) > maxScriptBytes {
+		return "dockerfile is too large (max 64KB)"
 	}
 	if len(b.Script) > maxScriptBytes {
-		return "script is too large (max 64KB); put it in the repo and use script_path instead"
+		return "script is too large (max 64KB)"
 	}
-	if b.ScriptPath != "" && !validRelPath(b.ScriptPath) {
-		return "script_path must be a relative path inside the build context (no .., no spaces)"
-	}
-	if b.Script != "" || b.ScriptPath != "" {
+	if b.Script != "" {
 		if b.Image == "" {
 			return "image (the build environment the script runs in, e.g. a maven or golang image) is required when a build script is set"
 		}
