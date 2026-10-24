@@ -19,8 +19,8 @@ import (
 )
 
 type config struct {
-	listen, appNsPrefix, projectPrefix, destServer, apiToken string
-	reconcileEvery                                           time.Duration
+	listen, appNamespace, project, destServer, apiToken string
+	reconcileEvery                                      time.Duration
 }
 
 func getenv(k, d string) string {
@@ -41,8 +41,8 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg := config{
 		listen:         getenv("LISTEN", ":8080"),
-		appNsPrefix:    getenv("APP_NAMESPACE_PREFIX", "argocd-apps-"),
-		projectPrefix:  getenv("PROJECT_PREFIX", "project-"),
+		appNamespace:   getenv("APP_NAMESPACE", "argocd-apps"),
+		project:        getenv("ARGOCD_PROJECT", "apps"),
 		destServer:     getenv("DEST_SERVER", "https://kubernetes.default.svc"),
 		apiToken:       os.Getenv("API_TOKEN"),
 		reconcileEvery: 10 * time.Second,

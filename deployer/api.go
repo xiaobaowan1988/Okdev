@@ -103,21 +103,17 @@ func validName(w http.ResponseWriter, kind, s string, max int) bool {
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
 
 func (a *API) createEnv(w http.ResponseWriter, r *http.Request) {
-	var in Env
+	var in struct {
+		Name string `json:"name"`
+	}
 	if !decode(w, r, &in) || !validName(w, "env", in.Name, 20) {
 		return
 	}
-	if in.Group == "" {
-		in.Group = "dev"
-	}
-	if !validName(w, "group", in.Group, 20) {
-		return
-	}
-	if err := a.store.CreateEnv(r.Context(), in.Name, in.Group); err != nil {
+	if err := a.store.CreateEnv(r.Context(), in.Name); err != nil {
 		a.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, in)
+	writeJSON(w, http.StatusCreated, map[string]string{"name": in.Name})
 }
 
 func (a *API) deleteEnv(w http.ResponseWriter, r *http.Request) {

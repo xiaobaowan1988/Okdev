@@ -1,8 +1,8 @@
-# 开启 "Apps in Any Namespace":允许 argocd 和 argocd-apps-* 命名空间里的 Application
-# (deployer 把 Application 放进 argocd-apps-<group>,边界由各自的 AppProject 约束)
+# 开启 "Apps in Any Namespace":允许 argocd 和 argocd-apps 命名空间里的 Application
+# (deployer 把所有 Application 放进 argocd-apps,边界由 AppProject apps 约束)
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: argocd-cmd-params-cm
 data:
-  application.namespaces: "argocd, argocd-apps-*"
+  application.namespaces: "argocd, argocd-apps"

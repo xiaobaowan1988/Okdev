@@ -1,0 +1,5 @@
+# 存放所有 Application 的配置命名空间(deployer 创建的 Application 都放这里,与业务命名空间 <环境>-env-<应用> 分开)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd-apps

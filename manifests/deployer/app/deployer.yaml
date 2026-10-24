@@ -22,7 +22,7 @@ spec:
             # 可选:创建 Secret deployer-api(key: token)后 API 要求 Bearer token;原型默认不开
             - name: API_TOKEN
               valueFrom: {secretKeyRef: {name: deployer-api, key: token, optional: true}}
-            # Application 放 argocd-apps-<环境 group>,绑 project-<环境 group>(前缀可用 APP_NAMESPACE_PREFIX / PROJECT_PREFIX 改)
+            # Application 都放 argocd-apps、绑 AppProject apps(默认值,可用 APP_NAMESPACE / ARGOCD_PROJECT 改)
           ports:
             - containerPort: 8080
           readinessProbe:
