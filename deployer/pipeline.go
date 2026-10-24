@@ -183,7 +183,7 @@ func buildJob(r Run, c buildConfig) (*batchv1.Job, error) {
 	}}
 	if r.Script != "" { // 构建脚本在构建环境镜像里以 sh -e 运行,工作目录是 context_path,产物留在那里供 Dockerfile 使用
 		inits = append(inits, corev1.Container{
-			Name: "script", Image: r.BuilderImage, WorkingDir: ctxDir, Command: []string{"sh", "-e", scriptFile},
+			Name: "script", Image: r.BuilderImage, WorkingDir: ctxDir, Command: []string{"sh", "-c", "exec sh -e " + scriptFile + " 2>&1"}, // stderr 并进 stdout:否则容器日志里两者的先后顺序不固定,失败信息可能取错行
 			Env: envVars(scriptEnv), VolumeMounts: []corev1.VolumeMount{ws, caMount}, Resources: res,
 		})
 	}

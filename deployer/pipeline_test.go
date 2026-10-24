@@ -74,7 +74,7 @@ func TestBuildJobWithScript(t *testing.T) {
 		t.Errorf("script must run in the context dir, got %q", script.WorkingDir)
 	}
 	// 脚本内容存在数据库里:由 git 步骤写成文件,script 步骤以 sh -e 运行它(内容不进命令行,也不进脚本容器的环境变量)
-	if strings.Join(script.Command, "|") != "sh|-e|/workspace/.deployer/build.sh" {
+	if strings.Join(script.Command, "|") != "sh|-c|exec sh -e /workspace/.deployer/build.sh 2>&1" {
 		t.Errorf("script command: %v", script.Command)
 	}
 	if _, ok := envMap(script)["BUILD_SCRIPT_TEXT"]; ok {
