@@ -47,14 +47,16 @@ YAML
 }
 
 snapshot() { # → JSON 数组:每个应用的 期望/实际/分类
+  # 注意:Application 的 status 很大(同步成功后含完整资源列表),不能整块当 jq 的命令行参数(会 Argument list too long),
+  # 所以先在管道里裁成几个字段再合并。
   local apps deps
-  apps=$(kubectl -n argocd get app -l trial=$T -o json) || return 1
-  deps=$(kubectl get deploy -A -o json | jq '[.items[] | select(.metadata.name=="web" and (.metadata.namespace|endswith("-env-race"))) | {ns:.metadata.namespace, r:.spec.replicas}]')
+  apps=$(kubectl -n argocd get app -l trial=$T -o json | jq -c '[.items[] | {name:.metadata.name,
+      want:(.metadata.annotations["race/desired"]|tonumber), ns:.spec.destination.namespace,
+      sync:(.status.sync.status // ""), msg:((.status.conditions // [])[0].message // ""),
+      err:(((.status.conditions // []) | map(select(.type|test("Error"))) | length) > 0)}]') || return 1
+  deps=$(kubectl get deploy -A -o json | jq -c '[.items[] | select(.metadata.name=="web" and (.metadata.namespace|endswith("-env-race"))) | {ns:.metadata.namespace, r:.spec.replicas}]') || return 1
   jq -n --argjson a "$apps" --argjson d "$deps" '
-    [$a.items[] | {name:.metadata.name, want:(.metadata.annotations["race/desired"]|tonumber), ns:.spec.destination.namespace,
-        sync:(.status.sync.status // ""), msg:((.status.conditions // [])[0].message // ""),
-        err:(((.status.conditions // []) | map(select(.type|test("Error"))) | length) > 0)}
-      | . as $x | . + {actual: (($d | map(select(.ns==$x.ns)) | .[0].r) // null)}
+    [$a[] | . as $x | . + {actual: (($d | map(select(.ns==$x.ns)) | .[0].r) // null)}
       | . + {cls: (if .err then "ERR" elif .actual==null then "MISSING" elif .actual==.want then "OK" else "WRONG" end)}]'
 }
 count() { jq -r --arg c "$1" '[.[] | select(.cls==$c)] | length' <<<"$2"; }
