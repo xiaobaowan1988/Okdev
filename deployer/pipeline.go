@@ -242,6 +242,11 @@ func (rn *Runner) tick(ctx context.Context) {
 		case r.CancelRequested:
 			rn.cancel(ctx, r)
 		case r.Status == RunPending:
+			// 同一个 (环境, 服务) 的运行按提交顺序串行:前面还有没结束的,就继续排队
+			if blocker := blockingRun(runs, r); blocker != 0 {
+				rn.markQueued(ctx, r, fmt.Sprintf("queued: waiting for run %d (same environment and service)", blocker))
+				continue
+			}
 			if building < rn.cfg.concurrency && rn.startBuild(ctx, r) {
 				building++
 			}
@@ -421,4 +426,29 @@ func lastError(log string) string {
 		}
 	}
 	return ""
+}
+
+// blockingRun 返回排在 r 前面、且部署目标与 r 相同((环境, 服务) 一样)的未结束运行的 id,0 表示没有。
+// runs 必须是 ActiveRuns 的结果(只含未结束的,按 id 升序)。已请求取消的运行马上会结束,不算阻塞。
+// 这样同一个部署上的运行严格按提交顺序依次构建和部署,后提交的一定最后生效,不会出现旧代码覆盖新代码。
+func blockingRun(runs []Run, r Run) int64 {
+	for _, o := range runs {
+		if o.ID >= r.ID {
+			break
+		}
+		if o.Env == r.Env && o.Service == r.Service && !o.CancelRequested {
+			return o.ID
+		}
+	}
+	return 0
+}
+
+// markQueued 把排队原因写进 message(只在变化时写,避免每轮都写库)。
+func (rn *Runner) markQueued(ctx context.Context, r Run, msg string) {
+	if r.Message == msg {
+		return
+	}
+	if _, err := rn.store.UpdateRun(ctx, r.ID, RunPending, RunUpdate{Message: &msg}); err != nil {
+		rn.log.Error("update run", "run", r.ID, "err", err)
+	}
 }

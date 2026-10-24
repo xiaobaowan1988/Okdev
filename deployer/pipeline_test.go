@@ -167,3 +167,37 @@ func TestLastError(t *testing.T) {
 		t.Errorf("must pick the last error, got %q", got)
 	}
 }
+
+func TestBlockingRun(t *testing.T) {
+	runs := []Run{
+		{ID: 3, Env: "dev3", Service: "api"},
+		{ID: 4, Env: "dev5", Service: "api"},                        // 不同环境:互不影响
+		{ID: 5, Env: "dev3", Service: "web"},                        // 不同服务:互不影响
+		{ID: 6, Env: "dev3", Service: "api"},                        // 被 3 阻塞
+		{ID: 7, Env: "dev3", Service: "api"},                        // 被 3 阻塞(最先的那个)
+		{ID: 8, Env: "dev3", Service: "api", CancelRequested: true}, // 已请求取消:不阻塞别人
+		{ID: 9, Env: "dev3", Service: "api"},
+	}
+	byID := func(id int64) Run {
+		for _, r := range runs {
+			if r.ID == id {
+				return r
+			}
+		}
+		t.Fatalf("no run %d", id)
+		return Run{}
+	}
+	for id, want := range map[int64]int64{3: 0, 4: 0, 5: 0, 6: 3, 7: 3, 9: 3} {
+		if got := blockingRun(runs, byID(id)); got != want {
+			t.Errorf("run %d blocked by %d, want %d", id, got, want)
+		}
+	}
+	// 排在前面的运行结束(从活动列表里消失)后,下一个就不再被阻塞
+	if got := blockingRun(runs[1:], byID(6)); got != 0 {
+		t.Errorf("run 6 should be free once run 3 is gone, got %d", got)
+	}
+	// 只有已请求取消的运行在前面时,不阻塞
+	if got := blockingRun([]Run{{ID: 1, Env: "e", Service: "s", CancelRequested: true}, {ID: 2, Env: "e", Service: "s"}}, Run{ID: 2, Env: "e", Service: "s"}); got != 0 {
+		t.Errorf("a cancelled blocker must not block, got %d", got)
+	}
+}
