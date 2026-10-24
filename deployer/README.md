@@ -178,10 +178,10 @@ curl $A/v1/runs/1        # 单个运行里有 script / dockerfile:创建这次�
 | 45 | `java-maven`(`mvn -P<profile>`,含 CA 导入) | 运行时覆盖 `prod`(builder 默认是 `dev`) | 成功,dev7 响应 `{"profile":"prod","greeting":"hello from prod","version":"r45"}`:Maven profile 真的进了 jar |
 
 失败路径(只构建的流水线,每个都 `failed`,环境不受影响,Job 已清理),`message` 直接指出哪一步、为什么:
-- 脚本 `exit 3` → `build failed at step "script" (exit code 3) — boom`
-- `script_path` 指向不存在的文件 → `step "script" (exit code 2) — sh: can't open 'ci/nope.sh'`
-- Dockerfile 路径不存在 → `step "image" (exit code 1) — Error: error resolving dockerfile path ...`(脚本那步已成功,问题落在打镜像)
+- 脚本 `exit 3` → `build failed at step "script" (exit code 3) — boom`(连跑三次都是 `boom`;脚本的 stderr 合并进 stdout,否则容器日志里两者先后不固定,曾经有一次取成了前一行)
+- Dockerfile 内容有语法错误 → `step "image" (exit code 1) — ... unknown instruction: FROMM (did you mean FROM?)`(脚本那步成功,问题落在打镜像)
 - 构建环境镜像不存在 → `build cannot start: step "script": ImagePullBackOff ...`(很快失败,不用等满 15 分钟)
+- builder 没登记 Dockerfile 内容就创建运行 → 400 `builder "api-badref" has no dockerfile`
 
 **这一节没验证的**:
 - **没配脚本的 builder(只有 `git` → `kaniko`)只有单测**,没有在集群里再跑一遍:示例都依赖脚本产物,没有现成的"只用 Dockerfile"示例可跑。
