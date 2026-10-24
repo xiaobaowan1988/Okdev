@@ -28,3 +28,27 @@ subjects:
   - kind: ServiceAccount
     name: deployer
     namespace: deployer
+---
+# 只读:核对工作负载的实际副本数(业务命名空间 <环境>-env-<应用> 是动态创建的,没法逐个授权,所以是集群级)。
+# 只有 get、只针对 deployments,不含 list/watch,也读不到 Secret。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: deployer-verify
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: deployer-verify
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: deployer-verify
+subjects:
+  - kind: ServiceAccount
+    name: deployer
+    namespace: deployer

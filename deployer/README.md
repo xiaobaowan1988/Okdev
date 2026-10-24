@@ -36,6 +36,10 @@ GET    /v1/envs/{env}/services/{svc}/history
 - `desired_state=running`:不存在就创建 Application;存在但 `spec` 与期望不符(有人手改)就改回;然后把 Application 的
   sync/health/第一条 condition 回写 `observed_*`。副本数/镜像通过 `source.kustomize.replicas/images` 传给 Argo CD。
 - `desired_state=deleted`:删 Application(带 `resources-finalizer`,Argo CD 级联删资源),等它消失后物理删除数据库行。
+- **副本数校验**:Application 报 Synced 且这一版期望之前已应用过时,直接读工作负载的实际 `spec.replicas` 与数据库比较。
+  不一致 → `observed_health=ReplicaMismatch`,`observed_message` 写明期望/实际,并对 Application 触发硬刷新(同一应用 90 秒内最多一次);
+  连续 3 轮仍不一致打 ERROR 日志。`observed_sync` 长时间(60 秒)停在 Unknown(如渲染报错)也会触发硬刷新清掉缓存的错误。
+  这是为了补 Argo CD 的盲区:实测出现过渲染出错误副本数却显示 Synced/Healthy。需要一个**集群级只读**权限(`deployer-verify`:只有 `get`、只针对 `deployments`)。
 - 只管带 `app.kubernetes.io/managed-by=deployer` 标签的 Application;同名但不是自己创建的会报冲突,不会动它。
 - 命名:Application `<服务>-<环境>`,都放 `argocd` 命名空间、绑 AppProject `apps`;目标命名空间 `<环境>-env-<服务>`(由 Argo CD 的 `CreateNamespace=true` 创建,删应用时保留)。
   边界由 AppProject `apps` 约束:只允许发往 `*-env-*` 命名空间(Application 在 `argocd` 命名空间,所以不需要 Apps in Any Namespace),集群级资源只放行 Namespace。环境之间没有 Argo CD 层面的隔离(同一集群、不需要隔离)。
@@ -49,7 +53,7 @@ GET    /v1/envs/{env}/services/{svc}/history
 kubectl apply -k manifests/deployer/app
 kubectl -n deployer port-forward svc/deployer 18080:8080
 ```
-程序在集群里跑,用 ServiceAccount + 只覆盖 `argocd` 命名空间里 Application 的 Role;数据库密码经 `secretKeyRef` 注入。
+程序在集群里跑,用 ServiceAccount + 只覆盖 `argocd` 命名空间里 Application 的 Role + 一个只读的 `deployer-verify`(集群级,只能 `get` deployments);数据库密码经 `secretKeyRef` 注入。
 演示用的服务在 fork 的 `demo/`(`web`、`app-a`、`app-b`、`app-c`,各是一个 nginx Deployment)。示例:
 ```bash
 A=http://127.0.0.1:18080
@@ -71,16 +75,19 @@ curl -X POST $A/v1/envs/dev1/services/web/scale -d '{"replicas":2}'
 ## 实测中发现的问题
 1. **死锁(已修)**:并发首次部署时,对不存在的行 `SELECT ... FOR UPDATE` 会在唯一索引上加间隙锁,两个事务各持锁再 INSERT 互相死锁(MySQL 1213),
    12 个并发里有 2 个返回 500。修法:先 `INSERT ... ON DUPLICATE KEY UPDATE id=id` 让行存在再锁行,并对 1213/1205 做有限次重试。
-2. **一次渲染错误(原因未确认)**:第一轮测试里 `dev1` 期望 1 个副本,Argo CD 同步到集群的却是 0,还报 Synced/Healthy;
+2. **渲染出错误副本数(原因未确认,已加防护)**:第一轮测试里 `dev1` 期望 1 个副本,Argo CD 同步到集群的却是 0,还报 Synced/Healthy;
    硬刷新后变成 1。Application 里的参数是对的,数据库也对。怀疑是多个 Application 同时从同一路径渲染、各带不同 kustomize 副本数覆盖时
-   的并发问题,但后面 18 个并发部署没有复现,**没有证据确认**。如果要上生产,建议 deployer 额外校验工作负载的实际副本数,不一致就触发硬刷新并告警。
+   的并发问题(见文末"再简化"一节里第二次观察),**没有证据确认根因**。防护:deployer 的副本数校验(见"对账循环"),不依赖根因是否查清。
+   验证过:停掉 Argo CD 控制器 + 手动改实际副本数 → deployer 在 ~一轮内标出 `ReplicaMismatch`、硬刷新 1 次、持续后打 ERROR;恢复控制器后自动回到 Healthy。
+   没验证的:真实的并发渲染错误本身(这次是人为制造的不一致,验证的是"能发现并告警",不是"根治");"Unknown 卡住就刷新"那条路径只有单测,没有在集群里制造过。
 
 ## 原型的局限
 - MySQL 单实例、数据在节点 hostPath;生产要托管/主从、备份与恢复演练。
 - API 默认无鉴权,没有按环境/服务的权限控制。
 - 只支持 kustomize 应用的 `replicas`/`image` 两个参数;变量体系、模板渲染、环境基准/子环境(自测模式)都没做。
 - 对账是轮询(10s),没有 watch Application 事件;观测状态有延迟。
-- 没有 CI 自动化测试,MySQL 相关逻辑(并发、乐观锁)只做过手工验证。
+- 没有 CI 自动化测试:Go 单测覆盖漂移比较、Application 生成、副本数校验(用 fake 客户端);MySQL 相关逻辑(并发、乐观锁、死锁重试)只做过手工验证。
+- 副本数校验只看 `replicas`,不看 `image` 等其它字段;只支持 Deployment。
 
 ## 从 ApplicationSet + 标记文件迁移过来(已完成,相关文件已删除)
 迁移时把旧的 `demo/<应用>/envs/<环境>.yaml` 标记导入了 deployer,步骤与结果:
@@ -112,4 +119,4 @@ curl -X POST $A/v1/envs/dev1/services/web/scale -d '{"replicas":2}'
 `kustomize build .../demo/app-b failed: resource with name app-b does not match a ...`,而同路径的 `app-b-dev2` 正常;约 2 分钟内自行恢复。
 这和前面 `dev1` 渲染成 0 副本是同一类现象,共同点是**多个 Application 同时从同一个路径渲染、各带 kustomize 副本数覆盖**。
 我的推断(未验证):repo-server 对同一份检出执行 `kustomize edit set replicas` 再 `kustomize build`,并发时会读到被另一个进程改写的 `kustomization.yaml`。
-前一次的症状更糟(渲染出错误的副本数还显示 Synced),这次是报错后自愈。所以上面"建议 deployer 校验实际副本数"仍然成立,而且应该优先做。
+前一次的症状更糟(渲染出错误的副本数还显示 Synced),这次是报错后自愈。副本数校验就是为这类情况加的(见"对账循环")。
