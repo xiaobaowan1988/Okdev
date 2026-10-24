@@ -49,15 +49,32 @@ deployer 给每个 Application 的 `kustomize` 增加 `namespace: <目标命名�
 然后 `./run-all.sh`(约 1 小时,可重复运行,已完成的 trial 会跳过)。
 
 ## 上游反馈材料(`upstream/`)
-我的会话没有 `argoproj/argo-cd` 的 push 权限,GitHub API 也被会话绑定拦住(不能建 issue/PR、不能搜索上游 issue、不能建 fork),所以这里是准备好、可直接提交的材料,**尚未提交**:
+我的会话没有 `argoproj/argo-cd` 的 push 权限,GitHub API 也被会话绑定拦住(不能在上游建 issue/PR、不能搜索上游 issue、不能建 fork),所以**没有向上游提交任何东西**。
+修复已经做在你的 fork 上:**`xiaobaowan1988/argo-cd` 的分支 `fix-kustomize-replicas-concurrency`**(提交 `04e4502`,基于 `master` 的 `1fd5e6e`,2 个文件 +17 行)。
 
 | 文件 | 内容 |
 |---|---|
-| `upstream/issue.md` | 按上游 bug_report 模板写好的 issue(英文),含根因、最小复现、对照实验数据、修复建议、未验证的部分 |
-| `upstream/fix.patch` | 修复(`AllowsConcurrentProcessing()` 加 `len(k.Replicas) == 0`)+ 单测;已在上游 master(Go 1.27.0)验证:新测试修复前失败、修复后通过,整个包通过,`go vet`/`gofmt` 干净 |
-| `upstream/pr.md` | 按上游 PR 模板写好的 PR 描述(DCO 等需要你本人完成的项没有替你勾) |
+| `upstream/issue.md` | 按上游 bug_report 模板写好的 issue(英文):根因、最小复现、对照实验数据、修复建议、未验证的部分 |
+| `upstream/fix.patch` | 同 fork 分支上的改动(`AllowsConcurrentProcessing()` 加 `len(k.Replicas) == 0` + 单测) |
+| `upstream/pr.md` | 按上游 PR 模板写好的 PR 描述 |
+
+**上游 `AGENTS.md` 的规则(对 AI 代理):没有"打开且被认可"的 issue 之前不要开 PR**,所以顺序必须是:先建 issue、等它被认可,再提 PR。
+
+本地检查结果(`make build/lint/test/codegen/cli` 依赖用 docker 构建的 `test-tools-image`,在沙箱里不可行,改跑等价的本地检查):
+
+| 检查 | 结果 |
+|---|---|
+| 新增测试(`Has Replicas`) | 修复前失败、修复后通过 |
+| `pkg/apis/application/v1alpha1` 整个包 | 通过 |
+| `golangci-lint` v2.15.0(与 CI 同版本,Go 1.27 编译,仓库配置) | 0 issues |
+| `go build ./...` | 通过 |
+| `reposerver/repository` 中 Kustomize/并发相关测试 | 通过 |
+| `util/kustomize` 包测试 | 1 个失败:`TestKustomizeBuildHelmChartsFromRealRepoStillWorksWithWrapper`,**不含我的改动时同样失败**(沙箱没有 `helm`),不是本次改动引起 |
+| `make codegen` | 未运行:只改了一个方法体,没动 API 结构体/字段/proto,生成物不会变 |
+| `make lint-ui`、UI 构建、`make test`(全量)、`make cli` | 未运行(需要 docker 工具链镜像 / 全量耗时) |
 
 提交步骤:
 1. **先查重**:在 https://github.com/argoproj/argo-cd/issues 搜 `AllowsConcurrentProcessing`、`kustomize replicas`、`kustomization.yaml is empty`(我无法搜索)。
-2. 补上 `argocd version` 输出,按 `issue.md` 开 issue。
-3. fork `argoproj/argo-cd`,在 fork 里:`git checkout -b fix-kustomize-replicas-concurrency && git apply fix.patch && git commit -s -m "fix: ..."`(`-s` 就是 DCO 签署,必须你本人),推送并按 `pr.md` 开 PR。
+2. 补上 `argocd version` 输出,按 `issue.md` 开 issue,等它被认可。
+3. **DCO 必须你本人签**:分支上的提交我**没有**加 `Signed-off-by`。在你自己的 fork 里:`git checkout fix-kustomize-replicas-concurrency && git commit --amend -s --no-edit && git push --force-with-lease`(提交里有我的 `Co-Authored-By` 署名,你可以按上游政策保留或去掉)。
+4. 从该分支向 `argoproj/argo-cd` 开 PR,按 `pr.md`,把 `Fixes #<ISSUE>` 填上。

@@ -1,4 +1,4 @@
-<!-- 在 issue 建好后,从你自己的 argo-cd fork 提交 PR。步骤见 README。DCO 必须由你本人签署(git commit -s),我没有替你勾选或签署。 -->
+<!-- 在 issue 被认可后,从 fork 的 fix-kustomize-replicas-concurrency 分支提交 PR。步骤见 README。DCO 必须由你本人签署(git commit --amend -s),我没有替你勾选或签署。 -->
 
 **Title:** fix: Do not render kustomize apps with `replicas` overrides concurrently
 
@@ -6,7 +6,7 @@ Fixes #<ISSUE NUMBER>
 
 `ApplicationSourceKustomize.AllowsConcurrentProcessing()` checks every kustomize option that makes `Build()` run `kustomize edit` in the shared checkout — except `Replicas`. Applications that only set `kustomize.replicas` were therefore rendered concurrently and overwrote each other's `kustomization.yaml`, producing wrong replica counts (reported as `Synced`) or `kustomization.yaml is empty` / `does not match a config` errors. See the issue for the reproduction and measurements.
 
-This PR adds `len(k.Replicas) == 0` to the check and a `Has Replicas` case (plus a "no params" case that must still allow concurrency) to `TestSourceAllowsConcurrentProcessing_KustomizeParams`. On current `master` the new `Has Replicas` case fails without the change and passes with it; the whole `pkg/apis/application/v1alpha1` package passes, `go vet` and `gofmt` are clean.
+This PR adds `len(k.Replicas) == 0` to the check and a `Has Replicas` case (plus a "no params" case that must still allow concurrency) to `TestSourceAllowsConcurrentProcessing_KustomizeParams`. On current `master` (`1fd5e6e`) the new `Has Replicas` case fails without the change and passes with it; the whole `pkg/apis/application/v1alpha1` package passes, `golangci-lint` v2.15.0 reports 0 issues, `go build ./...` succeeds, and the repo-server Kustomize/concurrency tests pass. (`util/kustomize` has one `helm`-dependent test that also fails on unmodified `master` in my environment because `helm` is not installed. No API structs changed, so `make codegen` output is unaffected.)
 
 Checklist:
 
