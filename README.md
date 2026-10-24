@@ -88,3 +88,10 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:
 ```bash
 ./scripts/install-kustomize.sh              # 默认 v5.8.1,可用 KUSTOMIZE_VERSION 覆盖
 ```
+
+## deployer 原型(MySQL 存期望状态)
+参考 Zadig 的思路:MySQL 存"哪个服务部署到哪个环境、副本数多少",Go 程序对账后创建 Argo CD Application。
+详见 [deployer/README.md](deployer/README.md)(设计、API、实测结果、发现的问题、局限)。
+```bash
+./scripts/deploy-mysql.sh && ./scripts/build-deployer.sh && kubectl apply -k manifests/deployer/app
+```

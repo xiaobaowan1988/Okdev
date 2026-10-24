@@ -1,1 +1,2 @@
 manifests/argocd/overlays/sandbox/ca-bundle.crt
+deployer/deployer

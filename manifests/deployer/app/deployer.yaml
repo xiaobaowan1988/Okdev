@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployer
+  namespace: deployer
+spec:
+  replicas: 1   # 对账用 MySQL GET_LOCK 选主,可以安全地调大
+  selector:
+    matchLabels: {app: deployer}
+  template:
+    metadata:
+      labels: {app: deployer}
+    spec:
+      serviceAccountName: deployer
+      containers:
+        - name: deployer
+          image: deployer:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MYSQL_PASSWORD
+              valueFrom: {secretKeyRef: {name: deployer-mysql, key: password}}
+            # 可选:创建 Secret deployer-api(key: token)后 API 要求 Bearer token;原型默认不开
+            - name: API_TOKEN
+              valueFrom: {secretKeyRef: {name: deployer-api, key: token, optional: true}}
+            - {name: APP_NAMESPACE, value: argocd-apps-dev}
+            - {name: ARGOCD_PROJECT, value: project-dev}
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deployer
+  namespace: deployer
+spec:
+  selector: {app: deployer}
+  ports:
+    - port: 8080
