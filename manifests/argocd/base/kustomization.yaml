@@ -4,5 +4,3 @@ namespace: argocd
 resources:
   - namespace.yaml
   - https://raw.githubusercontent.com/argoproj/argo-cd/v3.5.6/manifests/install.yaml
-patches:
-  - path: cmd-params-patch.yaml

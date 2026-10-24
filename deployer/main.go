@@ -41,7 +41,7 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg := config{
 		listen:         getenv("LISTEN", ":8080"),
-		appNamespace:   getenv("APP_NAMESPACE", "argocd-apps"),
+		appNamespace:   getenv("APP_NAMESPACE", "argocd"),
 		project:        getenv("ARGOCD_PROJECT", "apps"),
 		destServer:     getenv("DEST_SERVER", "https://kubernetes.default.svc"),
 		apiToken:       os.Getenv("API_TOKEN"),

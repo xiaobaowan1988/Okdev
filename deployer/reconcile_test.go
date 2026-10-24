@@ -22,10 +22,10 @@ func TestSubsetEqual(t *testing.T) {
 }
 
 func TestDesiredApp(t *testing.T) {
-	r := &Reconciler{cfg: config{appNamespace: "argocd-apps", project: "apps", destServer: "https://kubernetes.default.svc"}}
+	r := &Reconciler{cfg: config{appNamespace: "argocd", project: "apps", destServer: "https://kubernetes.default.svc"}}
 	x := EnvService{Env: "dev1", Service: "web", Replicas: 0, Image: "r/nginx:1", Repo: "https://x/y.git", Path: "demo/web", Revision: "HEAD", Workload: "web", ImageName: "r/nginx"}
 	app := r.desiredApp(x)
-	if app.GetName() != "web-dev1" || app.GetNamespace() != "argocd-apps" {
+	if app.GetName() != "web-dev1" || app.GetNamespace() != "argocd" {
 		t.Fatalf("bad identity %s/%s", app.GetNamespace(), app.GetName())
 	}
 	spec := app.Object["spec"].(map[string]any)

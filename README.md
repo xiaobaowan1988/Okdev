@@ -21,14 +21,14 @@ kubectl get pods -A
 ## Argo CD(kustomize 清单)
 ```
 manifests/
-├── argocd/base/               官方 install.yaml(v3.5.6)+ 开启 Apps in Any Namespace
+├── argocd/base/               官方 install.yaml(v3.5.6),不做任何定制
 ├── argocd/overlays/sandbox/   沙箱专用:repo-server 信任出口网关 CA
-├── apps/                      Application 的共用底座,**只有一份、与环境无关**:命名空间 argocd-apps、AppProject apps、仓库登记
+├── apps/                      Application 的共用底座,**只有一份、与环境无关**:AppProject apps、仓库登记
 └── deployer/                  MySQL + deployer 程序(见下),应用到环境的映射都在这里
 ```
 ```bash
 ./scripts/install-argocd.sh     # 检测到 /root/.ccr/ca-bundle.crt 时自动用 sandbox overlay
-./scripts/deploy-apps.sh        # 共用底座:argocd-apps 命名空间、AppProject apps、仓库登记
+./scripts/deploy-apps.sh        # 共用底座:AppProject apps、仓库登记
 kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:8080, 用户 admin
 ```
 `argocd-server` 保持 ClusterIP,通过 port-forward 访问。

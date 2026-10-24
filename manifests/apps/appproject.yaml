@@ -5,9 +5,6 @@ metadata:
   namespace: argocd
 spec:
   description: Applications managed by deployer (all environments)
-  # 只允许 argocd-apps 命名空间里的 Application 绑定到此项目
-  sourceNamespaces:
-    - argocd-apps
   # 项目默认不允许任何源仓库,必须显式列出
   sourceRepos:
     - https://github.com/xiaobaowan1988/argocd-example-apps.git
