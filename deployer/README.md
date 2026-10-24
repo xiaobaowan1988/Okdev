@@ -141,9 +141,7 @@ curl -X POST $A/v1/runs/1/cancel   # 取消
 | `repo_url` / `ref` / `context_path` | 源码在哪(各服务自己的);脚本的工作目录和 Docker 构建上下文都是 `context_path` |
 
 ```bash
-# examples/ 里有三套(脚本 + Dockerfile),register.sh 把它们登记成模板,再让 builder 引用(已存在就更新)
-A=http://127.0.0.1:18080 ./register.sh
-# 手工:先建模板(用 jq 把文件内容放进 JSON),再建 builder 引用它;第二个服务引用同一个模板
+# 先建模板(用 jq 把脚本和 Dockerfile 文件的内容放进 JSON),再建 builder 引用它;第二个服务引用同一个模板
 curl -X POST $A/v1/templates -d "$(jq -n --rawfile df Dockerfile --rawfile sc build.sh \
   '{name:"go-template",image:"mirror.gcr.io/library/golang:1.24-alpine",profile:"prod",dockerfile:$df,script:$sc}')"
 curl -X POST $A/v1/builders -d '{"name":"api-main","service":"api","repo_url":"<仓库>","context_path":"src/api","template":"go-template"}'
@@ -169,12 +167,37 @@ curl $A/v1/runs/1                  # 单个运行里有 script / dockerfile:创�
 `VERSION`(`r<运行号>`)、`PROFILE`、`GIT_REF`、`SERVICE`、`DEPLOY_ENV`、`WORKSPACE`(上下文目录)、`BUILD_EXTRA_CA_FILE`(见下)。Dockerfile 里用 `ARG VERSION`、`ARG PROFILE` 接。
 
 **沙箱里的 CA**:出口 HTTPS 被中间人,git 用 `/etc/build-ca/build-ca.crt`;JDK 自带信任库不认它,所以 `deploy-build.sh` 还会放一个只含沙箱网关根证书的 `extra-ca.crt`,脚本可以用 `$BUILD_EXTRA_CA_FILE` 导入自己的信任库
-(见 `examples/java-maven/build.sh`)。正常环境没有这个问题,变量指向的文件不存在时脚本里跳过即可。
+(下面是实测过的 Maven 脚本)。正常环境没有这个问题,变量指向的文件不存在时脚本里跳过即可。
+
+```sh
+# 构建脚本(在 maven 镜像里运行,工作目录是 context_path;PROFILE 选择 Maven profile)
+set -eu
+if [ -n "${BUILD_EXTRA_CA_FILE:-}" ] && [ -f "$BUILD_EXTRA_CA_FILE" ]; then
+  cp "$JAVA_HOME/lib/security/cacerts" /tmp/cacerts && chmod u+w /tmp/cacerts
+  awk '/BEGIN CERTIFICATE/{n++} {print > "/tmp/extra-ca-" n ".pem"}' "$BUILD_EXTRA_CA_FILE"
+  for f in /tmp/extra-ca-*.pem; do
+    keytool -importcert -noprompt -trustcacerts -alias "extra-$(basename "$f" .pem)" -file "$f" -keystore /tmp/cacerts -storepass changeit >/dev/null 2>&1 || true
+  done
+  export MAVEN_OPTS="-Djavax.net.ssl.trustStore=/tmp/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+fi
+mvn -B -ntp -q -P"${PROFILE:-dev}" -Dbuild.version="$VERSION" package
+```
+```dockerfile
+# 配套的单阶段 Dockerfile:jar 已经由上面的脚本生成在 target/ 里
+FROM mirror.gcr.io/library/eclipse-temurin:21-jre
+ARG VERSION=dev
+ARG PROFILE=default
+COPY target/app.jar /app/app.jar
+RUN printf '%s' "$VERSION" > /app/version.txt
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+```
 
 **没配脚本的 builder**:只有 `git` → `kaniko`,没有脚本步骤(Dockerfile 内容照样来自数据库)。
 **失败信息按步骤给**:`message` 形如 `build failed at step "script" (exit code 1) — [ERROR] ...`;日志按步骤分段(`=== step: checkout|script|image ===`);构建镜像拉不下来(`ImagePullBackOff`)会尽早失败,不用等满超时。
 
-示例见 `examples/`(`api`、`java-plain`、`java-maven`,`register.sh` 登记成三个模板):Dockerfile 只有一个 `FROM` + `COPY`;fork 里只剩源码。
+Dockerfile 只有一个 `FROM` + `COPY`;fork 里只剩源码。脚本和 Dockerfile 的内容**只存在数据库里**(MySQL 是单节点 hostPath、没有备份,库丢了就没了,需要自己留存一份)。
 
 **实测**(本集群;fork 里已经没有 Dockerfile 和脚本,构建用的全是数据库里的内容):
 
