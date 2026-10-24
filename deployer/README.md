@@ -176,12 +176,19 @@ curl $A/v1/runs/1                  # 单个运行里有 script / dockerfile:创�
 
 示例见 `examples/`(`api`、`java-plain`、`java-maven`,`register.sh` 登记成三个模板):Dockerfile 只有一个 `FROM` + `COPY`;fork 里只剩源码。
 
-**实测**(本集群,`build-and-deploy`,三个运行同时提交):
-| 运行 | builder | profile | 结果 |
+**实测**(本集群;fork 里已经没有 Dockerfile 和脚本,构建用的全是数据库里的内容):
+
+| 运行 | builder(配方来源) | profile | 结果 |
 |---|---|---|---|
-| 43 | `api-main`(go 编译) | 未指定 → builder 默认 `prod` | 成功,dev3 响应 `{"profile":"prod","version":"r43"}` |
-| 44 | `java-plain`(**内联脚本** javac+jar) | 未指定 → 默认 `default` | 成功,dev6 响应 `{"profile":"default","version":"r44"}` |
-| 45 | `java-maven`(`mvn -P<profile>`,含 CA 导入) | 运行时覆盖 `prod`(builder 默认是 `dev`) | 成功,dev7 响应 `{"profile":"prod","greeting":"hello from prod","version":"r45"}`:Maven profile 真的进了 jar |
+| 53 | `api-main`(builder 自带内容;go 编译) | 默认 `prod` | 成功,dev3 响应 `{"profile":"prod","version":"r53"}` |
+| 54 | `java-plain`(自带;javac + jar) | 默认 `default` | 成功,dev6 响应 `{"profile":"default","version":"r54"}` |
+| 55 | `java-maven`(自带;`mvn -P<profile>`,含 CA 导入) | 运行时覆盖成 `prod`(默认 `dev`) | 成功,dev7 响应 `{"profile":"prod","greeting":"hello from prod","version":"r55"}`:Maven profile 真的进了 jar |
+| 63 | `api-main`(**引用模板** `go-template`) | 模板默认 `prod` | 成功,dev8 响应 `{"profile":"prod","service":"api","version":"r63"}` |
+| 64 | `api-b-main`(**另一个服务 `api-b`**,引用**同一个** `go-template`) | builder 覆盖成 `staging` | 成功,dev8 响应 `{"profile":"staging","version":"r64"}`;镜像是 `api-b:r64`,和 `api` 各自独立 |
+| 65 | `api-main`,**改了模板之后**(模板 profile `prod`→`dev`,脚本末尾加一行标记) | `dev` | 成功;日志里有标记。**运行 63 的快照里没有标记、profile 仍是 `prod`**:改模板不影响已有运行 |
+
+模板和引用的校验:builder 引用模板时自带 `dockerfile`/`script`/`image` → 400;引用不存在的模板 → 404;模板配了脚本没配 `image` → 400;
+删除正被引用的模板 → 409(`used_by` 为 2 时);`GET /v1/templates` 带 `used_by`。
 
 失败路径(只构建的流水线,每个都 `failed`,环境不受影响,Job 已清理),`message` 直接指出哪一步、为什么:
 - 脚本 `exit 3` → `build failed at step "script" (exit code 3) — boom`(连跑三次都是 `boom`;脚本的 stderr 合并进 stdout,否则容器日志里两者先后不固定,曾经有一次取成了前一行)
@@ -190,11 +197,13 @@ curl $A/v1/runs/1                  # 单个运行里有 script / dockerfile:创�
 - builder 没登记 Dockerfile 内容就创建运行 → 400 `builder "api-badref" has no dockerfile`
 
 **这一节没验证的**:
+- **失败路径是在 builder 自带内容(没引用模板)时测的**,引用模板后没有重测;失败处理的代码没有改,但运行快照(含构建环境镜像)是新加的,只在成功路径上验证过。
+- **"排队时改模板/builder,排队的运行仍用快照"**只验证了快照读得出来、改模板后新运行用新内容、已完成运行的快照不变,没有专门造一个排队中的运行再去改模板。
 - **没配脚本的 builder(只有 `git` → `kaniko`)只有单测**,没有在集群里再跑一遍:示例都依赖脚本产物,没有现成的"只用 Dockerfile"示例可跑。
 - **`build-ca` ConfigMap 不存在时是否照常启动**没有实测(卷是 optional,但 kaniko 容器是用 `subPath` 挂载的,可能卡住 Pod 启动)。`deploy-build.sh` 会创建它,正常使用不受影响;在没有 CA 的环境里部署前请先实测或把 `BUILD_CA_CONFIGMAP` 留空(留空时不挂载)。
 - 脚本内容和 Dockerfile 内容会出现在构建 Pod 的环境变量里(给 git 步骤用),**不要往脚本里写密钥**;脚本和构建 Pod 一样以 root 运行、能访问外网;脚本是**任意代码执行**,谁能创建 builder 谁就能在集群里跑代码(接口目前没有鉴权)。构建 Pod 没有 ServiceAccount token,但没做网络隔离。
 - 没有构建缓存(Maven 依赖每次重新下载);脚本步骤的内存/CPU 限制沿用固定值,不能按 builder 调。
-- 测试里留下的 builder(`api-badref`、`api-baddockerfile`、`t-fail`、`t-noscript`、`t-nodocker`、`t-badimage`)因为运行记录外键删不掉,同上。
+- 测试里留下的 builder(`api-badref`、`api-baddockerfile`、`t-fail`、`t-noscript`、`t-nodocker`、`t-badimage`、`t-baddf`)因为运行记录外键删不掉,同上;另外 `api-b` 服务及它的 builder、dev8 里的部署是验证"多服务共用模板"留下的。模板、builder 都没有软删除。
 
 ## 对账循环(`reconcile.go`)
 - 每 10 秒一轮,API 写入后立即触发。多副本时用 MySQL `GET_LOCK` 选主,只有一个干活;leader 挂了锁随连接释放。
