@@ -95,7 +95,7 @@ func envVars(m map[string]string) []corev1.EnvVar {
 	return out
 }
 
-// buildJob 生成这次运行的构建任务:一个 Pod,按顺序执行 ① git(拉源码) ② script(构建脚本,只有关联了 app 才有)
+// buildJob 生成这次运行的构建任务:一个 Pod,按顺序执行 ① git(拉源码) ② script(构建脚本,builder 配了脚本才有)
 // ③ kaniko(用 Dockerfile 构建镜像并推送)。三步通过 emptyDir 共享源码和脚本产出的产物。
 func buildJob(r Run, c buildConfig) (*batchv1.Job, error) {
 	if err := validateRepoRef(r.RepoURL, r.Ref); err != nil {
@@ -170,12 +170,12 @@ func buildJob(r Run, c buildConfig) (*batchv1.Job, error) {
 		Env:          []corev1.EnvVar{{Name: "REPO", Value: r.RepoURL}, {Name: "REF", Value: r.Ref}},
 		VolumeMounts: []corev1.VolumeMount{ws, caMount}, Resources: res,
 	}}
-	if r.App != "" { // 构建脚本:内联脚本直接作为 sh -e 的参数;仓库里的脚本有可执行权限就按它的 shebang 运行,否则用 sh
+	if r.Script != "" || r.ScriptPath != "" { // 构建脚本:内联脚本直接作为 sh -e 的参数;仓库里的脚本有可执行权限就按它的 shebang 运行,否则用 sh
 		body := r.Script
 		env := scriptEnv
 		if body == "" {
-			body = `if [ -x "$APP_SCRIPT_PATH" ]; then exec "./$APP_SCRIPT_PATH"; else exec sh "$APP_SCRIPT_PATH"; fi`
-			env["APP_SCRIPT_PATH"] = r.ScriptPath
+			body = `if [ -x "$BUILD_SCRIPT_PATH" ]; then exec "./$BUILD_SCRIPT_PATH"; else exec sh "$BUILD_SCRIPT_PATH"; fi`
+			env["BUILD_SCRIPT_PATH"] = r.ScriptPath
 		}
 		inits = append(inits, corev1.Container{
 			Name: "script", Image: r.BuilderImage, WorkingDir: ctxDir, Command: []string{"sh", "-ec", body},

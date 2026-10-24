@@ -46,12 +46,12 @@ func envMap(c *corev1.Container) map[string]string {
 
 func appRun() Run {
 	return Run{ID: 7, Service: "api", Env: "dev3", Ref: "master", RepoURL: "https://github.com/o/r.git", ContextPath: "src/api",
-		Dockerfile: "Dockerfile.pkg", App: "go-app", Profile: "prod", BuilderImage: "golang:1.24-alpine", Script: "go build -o dist/api .",
+		Dockerfile: "Dockerfile.pkg", Profile: "prod", BuilderImage: "golang:1.24-alpine", Script: "go build -o dist/api .",
 		BuildArgs: map[string]string{"FOO": "bar", "VERSION": "user-supplied", "PROFILE": "user-profile"}}
 }
 
-// 关联了 app:三步(git → script → kaniko),脚本在构建环境镜像里运行,Dockerfile 来自 app。
-func TestBuildJobWithApp(t *testing.T) {
+// builder 配了脚本:三步(git → script → kaniko),脚本在构建环境镜像里运行,Dockerfile 来自 builder。
+func TestBuildJobWithScript(t *testing.T) {
 	job, err := buildJob(appRun(), testCfg())
 	if err != nil {
 		t.Fatal(err)
@@ -124,12 +124,12 @@ func TestBuildJobScriptPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := container(job.Spec.Template.Spec.InitContainers, "script")
-	if envMap(script)["APP_SCRIPT_PATH"] != "ci/build.sh" || strings.Contains(script.Command[2], "ci/build.sh") || !strings.Contains(script.Command[2], `[ -x "$APP_SCRIPT_PATH" ]`) {
+	if envMap(script)["BUILD_SCRIPT_PATH"] != "ci/build.sh" || strings.Contains(script.Command[2], "ci/build.sh") || !strings.Contains(script.Command[2], `[ -x "$BUILD_SCRIPT_PATH" ]`) {
 		t.Errorf("script path handling: env=%v cmd=%q", envMap(script), script.Command[2])
 	}
 }
 
-// 没有 app:老式构建器,只有 git → kaniko,用构建器自己的 Dockerfile,没有 script 步骤。
+// 没配脚本:老式构建器,只有 git → kaniko,用构建器自己的 Dockerfile,没有 script 步骤。
 func TestBuildJobLegacyNoApp(t *testing.T) {
 	r := Run{ID: 3, Service: "api", Ref: "master", RepoURL: "https://github.com/o/r.git", ContextPath: ".", Dockerfile: "Dockerfile"}
 	cfg := testCfg()
@@ -396,31 +396,7 @@ func TestLastLineAndGitFatal(t *testing.T) {
 
 func TestEffectiveProfile(t *testing.T) {
 	if effectiveProfile("dev", "prod") != "dev" || effectiveProfile("", "prod") != "prod" || effectiveProfile("", "") != "" {
-		t.Error("requested profile wins, otherwise the app default")
-	}
-}
-
-func TestNormalizeApp(t *testing.T) {
-	ok := App{Name: "a", Script: "echo hi", Profile: "prod"}
-	if msg := normalizeApp(&ok); msg != "" || ok.Dockerfile != "Dockerfile" {
-		t.Errorf("valid inline app: %q %q", msg, ok.Dockerfile)
-	}
-	if msg := normalizeApp(&App{ScriptPath: "ci/build.sh", Dockerfile: "docker/Dockerfile.prod"}); msg != "" {
-		t.Errorf("valid script_path app: %q", msg)
-	}
-	for name, a := range map[string]App{
-		"neither script nor path": {},
-		"both script and path":    {Script: "x", ScriptPath: "y.sh"},
-		"absolute script path":    {ScriptPath: "/etc/x.sh"},
-		"traversal script path":   {ScriptPath: "../x.sh"},
-		"space in script path":    {ScriptPath: "my build.sh"},
-		"traversal dockerfile":    {Script: "x", Dockerfile: "../Dockerfile"},
-		"bad profile":             {Script: "x", Profile: "a b"},
-		"script too large":        {Script: strings.Repeat("x", maxScriptBytes+1)},
-	} {
-		if msg := normalizeApp(&a); msg == "" {
-			t.Errorf("%s: expected a validation error", name)
-		}
+		t.Error("requested profile wins, otherwise the builder default")
 	}
 }
 
@@ -428,21 +404,35 @@ func TestNormalizeBuilder(t *testing.T) {
 	base := func() Builder { return Builder{Name: "b", Service: "s", RepoURL: "https://github.com/o/r.git"} }
 	b := base()
 	if msg := normalizeBuilder(&b); msg != "" || b.Dockerfile != "Dockerfile" || b.Ref != "master" || b.ContextPath != "." {
-		t.Errorf("legacy builder defaults: %q %+v", msg, b)
-	}
-	b = base()
-	b.App, b.Image = "go-app", "golang:1.24-alpine"
-	if msg := normalizeBuilder(&b); msg != "" {
-		t.Errorf("builder with app: %q", msg)
+		t.Errorf("defaults (no script): %q %+v", msg, b)
 	}
 	for name, mutate := range map[string]func(*Builder){
-		"app without image":           func(b *Builder) { b.App = "go-app" },
-		"app with its own dockerfile": func(b *Builder) { b.App, b.Image, b.Dockerfile = "go-app", "golang:1.24", "Dockerfile" },
-		"image without app":           func(b *Builder) { b.Image = "golang:1.24" },
-		"bad image reference":         func(b *Builder) { b.App, b.Image = "go-app", "bad image!" },
-		"bad context path":            func(b *Builder) { b.ContextPath = "../x" },
-		"bad legacy dockerfile":       func(b *Builder) { b.Dockerfile = "../Dockerfile" },
-		"non-http repo":               func(b *Builder) { b.RepoURL = "git@github.com:o/r.git" },
+		"inline script": func(b *Builder) { b.Script, b.Image, b.Profile = "echo hi", "golang:1.24-alpine", "prod" },
+		"script in repo": func(b *Builder) {
+			b.ScriptPath, b.Image, b.Dockerfile = "ci/build.sh", "maven:3.9", "docker/Dockerfile.prod"
+		},
+		"no script, only dockerfile": func(b *Builder) { b.Dockerfile = "Dockerfile.x" },
+	} {
+		b := base()
+		mutate(&b)
+		if msg := normalizeBuilder(&b); msg != "" {
+			t.Errorf("%s should be valid: %q", name, msg)
+		}
+	}
+	for name, mutate := range map[string]func(*Builder){
+		"script without image":      func(b *Builder) { b.Script = "x" },
+		"script_path without image": func(b *Builder) { b.ScriptPath = "ci/b.sh" },
+		"image without script":      func(b *Builder) { b.Image = "golang:1.24" },
+		"both script and path":      func(b *Builder) { b.Script, b.ScriptPath, b.Image = "x", "y.sh", "golang:1.24" },
+		"absolute script path":      func(b *Builder) { b.ScriptPath, b.Image = "/etc/x.sh", "golang:1.24" },
+		"traversal script path":     func(b *Builder) { b.ScriptPath, b.Image = "../x.sh", "golang:1.24" },
+		"space in script path":      func(b *Builder) { b.ScriptPath, b.Image = "my build.sh", "golang:1.24" },
+		"script too large":          func(b *Builder) { b.Script, b.Image = strings.Repeat("x", maxScriptBytes+1), "golang:1.24" },
+		"bad image reference":       func(b *Builder) { b.Script, b.Image = "x", "bad image!" },
+		"bad profile":               func(b *Builder) { b.Script, b.Image, b.Profile = "x", "golang:1.24", "a b" },
+		"traversal dockerfile":      func(b *Builder) { b.Dockerfile = "../Dockerfile" },
+		"bad context path":          func(b *Builder) { b.ContextPath = "../x" },
+		"non-http repo":             func(b *Builder) { b.RepoURL = "git@github.com:o/r.git" },
 	} {
 		b := base()
 		mutate(&b)

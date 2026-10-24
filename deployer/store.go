@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -87,17 +88,6 @@ var ddl = []string{
 	  UNIQUE KEY uq_env_service (env_id, service_id),
 	  CONSTRAINT fk_es_env FOREIGN KEY (env_id) REFERENCES environment(id),
 	  CONSTRAINT fk_es_svc FOREIGN KEY (service_id) REFERENCES service(id))`,
-	// 应用(构建配方):用什么构建脚本、哪个 Dockerfile、默认 profile。脚本在构建环境镜像里运行,产出产物后
-	// 由 Dockerfile(单阶段)把产物打进镜像。script(内联脚本)和 script_path(仓库里的脚本路径)二选一。
-	`CREATE TABLE IF NOT EXISTS app (
-	  id BIGINT AUTO_INCREMENT PRIMARY KEY,
-	  name VARCHAR(63) NOT NULL UNIQUE,
-	  description VARCHAR(255) NOT NULL DEFAULT '',
-	  script MEDIUMTEXT NULL,
-	  script_path VARCHAR(255) NOT NULL DEFAULT '',
-	  dockerfile VARCHAR(255) NOT NULL DEFAULT 'Dockerfile',
-	  profile VARCHAR(63) NOT NULL DEFAULT '',
-	  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
 	// 构建器:描述"怎么构建某个服务的镜像",必须关联一个服务(外键)
 	`CREATE TABLE IF NOT EXISTS builder (
 	  id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -186,23 +176,44 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 		return nil
 	}
-	if err := addColumn("builder", "app_id", "BIGINT NULL"); err != nil {
-		return err
-	}
-	if err := addColumn("builder", "image", "VARCHAR(255) NOT NULL DEFAULT ''"); err != nil {
-		return err
+	// 构建器上的构建脚本(script 内联 / script_path 在仓库里,二选一,都空表示只用 Dockerfile 构建)、构建环境镜像和默认 profile
+	for _, c := range [][2]string{
+		{"image", "VARCHAR(255) NOT NULL DEFAULT ''"},
+		{"script", "MEDIUMTEXT NULL"},
+		{"script_path", "VARCHAR(255) NOT NULL DEFAULT ''"},
+		{"profile", "VARCHAR(63) NOT NULL DEFAULT ''"},
+	} {
+		if err := addColumn("builder", c[0], c[1]); err != nil {
+			return err
+		}
 	}
 	if err := addColumn("pipeline_run", "profile", "VARCHAR(63) NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	var fk int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
-	  WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='builder' AND CONSTRAINT_NAME='fk_builder_app'`).Scan(&fk); err != nil {
+	// 老库:曾经有独立的 app 表(构建配方)。把配方复制进引用它的 builder,再删掉 app 表、外键和 app_id 列。
+	var hasApp int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.COLUMNS
+	  WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='builder' AND COLUMN_NAME='app_id'`).Scan(&hasApp); err != nil {
 		return err
 	}
-	if fk == 0 {
-		if _, err := conn.ExecContext(ctx, `ALTER TABLE builder ADD CONSTRAINT fk_builder_app FOREIGN KEY (app_id) REFERENCES app(id)`); err != nil {
+	if hasApp > 0 {
+		var fk int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+		  WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='builder' AND CONSTRAINT_NAME='fk_builder_app'`).Scan(&fk); err != nil {
 			return err
+		}
+		for _, stmt := range []string{
+			`UPDATE builder b JOIN app a ON a.id=b.app_id SET b.script=a.script, b.script_path=a.script_path, b.dockerfile=a.dockerfile, b.profile=a.profile`,
+			`ALTER TABLE builder DROP FOREIGN KEY fk_builder_app`,
+			`ALTER TABLE builder DROP COLUMN app_id`,
+			`DROP TABLE IF EXISTS app`,
+		} {
+			if fk == 0 && strings.Contains(stmt, "DROP FOREIGN KEY") {
+				continue
+			}
+			if _, err := conn.ExecContext(ctx, stmt); err != nil {
+				return err
+			}
 		}
 	}
 	// 老库去掉已废弃的 env_group 列(曾用于按 group 分命名空间/AppProject,现统一为一个)
