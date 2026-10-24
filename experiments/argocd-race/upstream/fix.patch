@@ -1,0 +1,39 @@
+diff --git a/pkg/apis/application/v1alpha1/types.go b/pkg/apis/application/v1alpha1/types.go
+index 90fd5fee..7680932d 100644
+--- a/pkg/apis/application/v1alpha1/types.go
++++ b/pkg/apis/application/v1alpha1/types.go
+@@ -841,6 +841,7 @@ type KustomizeGvk struct {
+ // AllowsConcurrentProcessing returns true if multiple processes can run Kustomize builds on the same source at the same time
+ func (k *ApplicationSourceKustomize) AllowsConcurrentProcessing() bool {
+ 	return len(k.Images) == 0 &&
++		len(k.Replicas) == 0 &&
+ 		len(k.CommonLabels) == 0 &&
+ 		len(k.CommonAnnotations) == 0 &&
+ 		k.NamePrefix == "" &&
+diff --git a/pkg/apis/application/v1alpha1/types_test.go b/pkg/apis/application/v1alpha1/types_test.go
+index adf7f548..d209fcba 100644
+--- a/pkg/apis/application/v1alpha1/types_test.go
++++ b/pkg/apis/application/v1alpha1/types_test.go
+@@ -4755,6 +4755,22 @@ func TestSourceAllowsConcurrentProcessing_KustomizeParams(t *testing.T) {
+ 
+ 		assert.False(t, src.AllowsConcurrentProcessing())
+ 	})
++
++	// `kustomize edit set replicas` rewrites kustomization.yaml in the shared checkout, so Replicas must
++	// prevent concurrent processing just like Images, Patches etc. do.
++	t.Run("Has Replicas", func(t *testing.T) {
++		src := ApplicationSource{Path: ".", Kustomize: &ApplicationSourceKustomize{
++			Replicas: KustomizeReplicas{{Name: "my-deployment", Count: intstr.FromInt32(2)}},
++		}}
++
++		assert.False(t, src.AllowsConcurrentProcessing())
++	})
++
++	t.Run("No params allows concurrent processing", func(t *testing.T) {
++		src := ApplicationSource{Path: ".", Kustomize: &ApplicationSourceKustomize{}}
++
++		assert.True(t, src.AllowsConcurrentProcessing())
++	})
+ }
+ 
+ func TestUnSetCascadedDeletion(t *testing.T) {
