@@ -89,6 +89,16 @@ var ddl = []string{
 	  UNIQUE KEY uq_env_service (env_id, service_id),
 	  CONSTRAINT fk_es_env FOREIGN KEY (env_id) REFERENCES environment(id),
 	  CONSTRAINT fk_es_svc FOREIGN KEY (service_id) REFERENCES service(id))`,
+	// 构建模板:一套可以被多个构建器共用的构建配方(构建脚本、Dockerfile、构建环境镜像、默认 profile),内容都存在数据库里。
+	`CREATE TABLE IF NOT EXISTS build_template (
+	  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+	  name VARCHAR(63) NOT NULL UNIQUE,
+	  description VARCHAR(255) NOT NULL DEFAULT '',
+	  script MEDIUMTEXT NULL,
+	  dockerfile MEDIUMTEXT NOT NULL,
+	  image VARCHAR(255) NOT NULL DEFAULT '',
+	  profile VARCHAR(63) NOT NULL DEFAULT '',
+	  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
 	// 构建器:描述"怎么构建某个服务的镜像",必须关联一个服务(外键)
 	`CREATE TABLE IF NOT EXISTS builder (
 	  id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -183,6 +193,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{"builder", "script", "MEDIUMTEXT NULL"},
 		{"builder", "dockerfile_text", "MEDIUMTEXT NULL"},
 		{"builder", "profile", "VARCHAR(63) NOT NULL DEFAULT ''"},
+		{"builder", "template_id", "BIGINT NULL"},
+		{"pipeline_run", "build_image", "VARCHAR(255) NOT NULL DEFAULT ''"},
 		{"pipeline_run", "profile", "VARCHAR(63) NOT NULL DEFAULT ''"},
 		{"pipeline_run", "script_text", "MEDIUMTEXT NULL"},
 		{"pipeline_run", "dockerfile_text", "MEDIUMTEXT NULL"},
@@ -190,6 +202,22 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if err := addColumn(c[0], c[1], c[2]); err != nil {
 			return err
 		}
+	}
+	// builder.template_id → build_template 的外键(被引用的模板删不掉)
+	var tfk int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+	  WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='builder' AND CONSTRAINT_NAME='fk_builder_template'`).Scan(&tfk); err != nil {
+		return err
+	}
+	if tfk == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE builder ADD CONSTRAINT fk_builder_template FOREIGN KEY (template_id) REFERENCES build_template(id)`); err != nil {
+			return err
+		}
+	}
+	// build_image 是新加的运行快照列:升级时还没结束的运行补上构建器当前的镜像(已结束的历史不动)
+	if _, err := conn.ExecContext(ctx, `UPDATE pipeline_run r JOIN builder b ON b.id=r.builder_id SET r.build_image=b.image
+	  WHERE r.build_image='' AND b.image<>'' AND r.status IN ('pending','building','deploying')`); err != nil {
+		return err
 	}
 	// 已废弃的列:dockerfile / script_path 原来只存仓库里的路径,现在改存内容。
 	dropColumn := func(table, col string) error {

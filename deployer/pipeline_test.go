@@ -435,6 +435,57 @@ func TestNormalizeBuilder(t *testing.T) {
 	}
 }
 
+// 引用模板的 builder:内容来自模板,自己不能再写脚本/Dockerfile/镜像;profile 可以覆盖。
+func TestNormalizeBuilderWithTemplate(t *testing.T) {
+	base := func() Builder {
+		return Builder{Name: "b", Service: "s", Template: "go-template", RepoURL: "https://github.com/o/r.git"}
+	}
+	b := base()
+	b.Profile = "dev"
+	if msg := normalizeBuilder(&b); msg != "" || b.Ref != "master" || b.ContextPath != "." {
+		t.Errorf("template builder (profile override): %q %+v", msg, b)
+	}
+	for name, mutate := range map[string]func(*Builder){
+		"own dockerfile": func(b *Builder) { b.Dockerfile = "FROM scratch\n" },
+		"own script":     func(b *Builder) { b.Script = "make" },
+		"own image":      func(b *Builder) { b.Image = "golang:1.24" },
+		"bad profile":    func(b *Builder) { b.Profile = "a b" },
+		"bad context":    func(b *Builder) { b.ContextPath = "../x" },
+	} {
+		b := base()
+		mutate(&b)
+		if msg := normalizeBuilder(&b); msg == "" {
+			t.Errorf("%s: expected a validation error", name)
+		}
+	}
+}
+
+func TestValidateRecipe(t *testing.T) {
+	df := "FROM scratch\nCOPY app /app\n"
+	for name, c := range map[string][4]string{
+		"dockerfile only":          {df, "", "", ""},
+		"script + image + profile": {df, "make", "golang:1.24-alpine", "prod"},
+	} {
+		if msg := validateRecipe(c[0], c[1], c[2], c[3]); msg != "" {
+			t.Errorf("%s should be valid: %q", name, msg)
+		}
+	}
+	for name, c := range map[string][4]string{
+		"no dockerfile":        {"", "make", "golang:1.24", ""},
+		"blank dockerfile":     {" \n", "", "", ""},
+		"script without image": {df, "make", "", ""},
+		"image without script": {df, "", "golang:1.24", ""},
+		"bad image":            {df, "make", "bad image!", ""},
+		"bad profile":          {df, "", "", "a b"},
+		"big dockerfile":       {strings.Repeat("x", maxScriptBytes+1), "", "", ""},
+		"big script":           {df, strings.Repeat("x", maxScriptBytes+1), "golang:1.24", ""},
+	} {
+		if msg := validateRecipe(c[0], c[1], c[2], c[3]); msg == "" {
+			t.Errorf("%s: expected a validation error", name)
+		}
+	}
+}
+
 func TestValidRelPath(t *testing.T) {
 	for _, ok := range []string{"Dockerfile", "ci/build.sh", "docker/Dockerfile.prod", "a-b_c/d.e"} {
 		if !validRelPath(ok) {

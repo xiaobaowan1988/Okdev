@@ -125,33 +125,39 @@ curl -X POST $A/v1/runs/1/cancel   # 取消
   **修复后的实测**:同时提交 3 次,每次都是同一时刻只有 1 个构建 Job,后提交的显示 `queued: waiting for run N`,两个依次 `succeeded`(间隔约 5 秒,即前一个结束后下一个才开始),最终环境里是编号更大的、部署历史顺序与提交顺序一致;
   不同环境同时提交仍然并行(2 个 Job 同时构建);取消排在前面的运行后排队的接着开始;前面的运行失败后排队的不会被卡住;排队中途重启 deployer,队列仍然正确(它是从数据库推导的)。
   代价:同一环境同一服务的连续运行变慢(依次各约 50 秒);排在前面的运行如果卡住(构建最长 15 分钟、部署最长 10 分钟),后面的都得等它超时或被取消。
-## 自定义构建脚本、Dockerfile 和 profile(都在 builder 上,内容存 MySQL)
+## 构建配方:脚本、Dockerfile、profile(内容存 MySQL,可以做成模板被多个服务共用)
 不用多阶段 Dockerfile:**先跑一段你自己的构建脚本**(编译、`mvn package`、`npm run build` 都行),产物留在工作目录里,**再用单阶段 Dockerfile 把产物打进镜像**。
-**脚本和 Dockerfile 的内容都存在数据库里,代码库里不放**(代码库只有源码)。它们是 `builder` 的字段(和 Zadig 一样:构建配置挂在服务的"构建"下面;`service` 不变)。
-曾经有过单独的 `app` 表和"只存路径"的做法,都已去掉:升级时 deployer 启动会把 app 的脚本复制进 builder 并删掉 `app` 表;
-**原来只存了路径的 Dockerfile 无法自动迁移,需要重新登记内容**(`register.sh` 就是干这个的),没有 Dockerfile 的 builder 创建运行时返回 400。
+**脚本和 Dockerfile 的内容都存在数据库里,代码库里不放**(代码库只有源码)。`service` 不变。
 
-| `builder` 字段 | 含义 |
+一套配方包含:Dockerfile 的内容(必填,最大 64KB)、构建脚本的内容(可选,最大 64KB;不填就不跑脚本)、构建环境镜像 `image`(脚本在这里面运行,如 `maven:3.9-eclipse-temurin-21`;配了脚本时必填,没配时不能填)、默认 `profile`。
+配方有两种放法,**二选一**:
+- **构建模板(`build_template`,推荐)**:配方存成模板,多个 builder(也就是多个服务)引用同一个模板。**改模板,引用它的所有 builder 下次构建都用新内容**;被引用的模板删不掉(409)。
+- **builder 自带**:把 `dockerfile` / `script` / `image` 直接写在 builder 上,只给这一个 builder 用。
+
+| 字段 | 说明 |
 |---|---|
-| `dockerfile` | **Dockerfile 的内容**(必填,最大 64KB),单阶段,只负责把产物打进镜像 |
-| `script` | **构建脚本的内容**(可选,最大 64KB)。不填就不跑脚本,Dockerfile 直接用仓库里的源码 |
-| `image` | **构建环境镜像**:脚本在这里面运行(如 `maven:3.9-eclipse-temurin-21`)。配了脚本时必填;没配脚本时不能填 |
-| `profile` | 默认 profile,运行时可以覆盖 |
-| `repo_url` / `ref` / `context_path` | 源码在哪;脚本的工作目录和 Docker 构建上下文都是 `context_path` |
+| `template`(builder) | 引用的模板名。**设了它,builder 自己的 `dockerfile`/`script`/`image` 必须留空**(否则 400,避免"到底用哪个"的歧义) |
+| `profile`(builder) | 可选,覆盖模板的默认 profile;运行时还可以再覆盖(**运行 > builder > 模板**) |
+| `repo_url` / `ref` / `context_path` | 源码在哪(各服务自己的);脚本的工作目录和 Docker 构建上下文都是 `context_path` |
 
 ```bash
-# examples/ 里有三套(脚本 + Dockerfile),register.sh 把它们的内容登记成 builder(已存在就更新)
+# examples/ 里有三套(脚本 + Dockerfile),register.sh 把它们登记成模板,再让 builder 引用(已存在就更新)
 A=http://127.0.0.1:18080 ./register.sh
-# 手工登记:用 jq 把文件内容放进 JSON
-curl -X POST $A/v1/builders -d "$(jq -n --rawfile df Dockerfile --rawfile sc build.sh \
-  '{name:"java-maven",service:"java-api",repo_url:"<仓库>",context_path:"src/java-maven",
-    image:"mirror.gcr.io/library/maven:3.9-eclipse-temurin-21",profile:"dev",dockerfile:$df,script:$sc}')"
-curl -X POST $A/v1/pipelines/build-and-deploy/runs -d '{"builder":"java-maven","env":"dev5","profile":"prod"}'   # 本次用 prod
-curl $A/v1/runs/1        # 单个运行里有 script / dockerfile:创建这次运行时 builder 里内容的快照(列表接口不带)
+# 手工:先建模板(用 jq 把文件内容放进 JSON),再建 builder 引用它;第二个服务引用同一个模板
+curl -X POST $A/v1/templates -d "$(jq -n --rawfile df Dockerfile --rawfile sc build.sh \
+  '{name:"go-template",image:"mirror.gcr.io/library/golang:1.24-alpine",profile:"prod",dockerfile:$df,script:$sc}')"
+curl -X POST $A/v1/builders -d '{"name":"api-main","service":"api","repo_url":"<仓库>","context_path":"src/api","template":"go-template"}'
+curl -X POST $A/v1/builders -d '{"name":"api-b-main","service":"api-b","repo_url":"<仓库>","context_path":"src/api","template":"go-template","profile":"staging"}'
+curl $A/v1/templates               # 每个模板有 used_by:有多少个 builder 在引用
+curl -X POST $A/v1/pipelines/build-and-deploy/runs -d '{"builder":"api-main","env":"dev5","profile":"dev"}'   # 本次用 dev
+curl $A/v1/runs/1                  # 单个运行里有 script / dockerfile:创建这次运行时生效的内容快照(列表接口不带)
 ```
 
-**每次运行会快照脚本和 Dockerfile**:创建运行时把当时 builder 里的内容复制进 `pipeline_run`,所以之后修改 builder 不影响已排队的运行,
-也能事后查到某次运行用的是哪一版。(这一条只有逻辑上的保证和读取验证,没专门做"排队时改 builder"的集群测试。)
+**每次运行会快照最终生效的配方**(脚本、Dockerfile、构建环境镜像、profile):创建运行时把当时生效的内容(模板或 builder 自带)复制进 `pipeline_run`,
+所以之后改模板或 builder 不影响已排队和已完成的运行,也能事后查到某次运行用的是哪一版。
+
+**升级说明**:曾经有过独立的 `app` 表和"只存路径"的做法,都已去掉(升级时 app 的脚本会复制进 builder 并删掉 `app` 表);原来只存了路径的 Dockerfile 无法自动迁移,需要重新登记内容。
+没有 Dockerfile 内容的 builder 创建运行时返回 400。
 
 **一次构建在一个 Pod 里按顺序做三步**(共用一个 emptyDir `/workspace`):
 1. `git`(init 容器):把 `ref` 拉到 `/workspace`,再把脚本和 Dockerfile 的内容写成文件。
@@ -168,7 +174,7 @@ curl $A/v1/runs/1        # 单个运行里有 script / dockerfile:创建这次�
 **没配脚本的 builder**:只有 `git` → `kaniko`,没有脚本步骤(Dockerfile 内容照样来自数据库)。
 **失败信息按步骤给**:`message` 形如 `build failed at step "script" (exit code 1) — [ERROR] ...`;日志按步骤分段(`=== step: checkout|script|image ===`);构建镜像拉不下来(`ImagePullBackOff`)会尽早失败,不用等满超时。
 
-示例见 `examples/`(`api`、`java-plain`、`java-maven`):Dockerfile 只有一个 `FROM` + `COPY`;fork 里只剩源码。
+示例见 `examples/`(`api`、`java-plain`、`java-maven`,`register.sh` 登记成三个模板):Dockerfile 只有一个 `FROM` + `COPY`;fork 里只剩源码。
 
 **实测**(本集群,`build-and-deploy`,三个运行同时提交):
 | 运行 | builder | profile | 结果 |

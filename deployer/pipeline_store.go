@@ -14,7 +14,8 @@ import (
 
 type Builder struct {
 	Name        string            `json:"name"`
-	Service     string            `json:"service"` // 关联的服务(必填)
+	Service     string            `json:"service"`            // 关联的服务(必填)
+	Template    string            `json:"template,omitempty"` // 引用的构建模板:脚本、Dockerfile、构建环境镜像都来自模板(此时 builder 自己不能再写这三项)
 	RepoURL     string            `json:"repo_url"`
 	Ref         string            `json:"ref"`                  // 分支、tag、完整 ref(refs/...)或 commit SHA,运行时可覆盖
 	ContextPath string            `json:"context_path"`         // 仓库里的构建目录:脚本在这里运行,也是 Docker 构建上下文
@@ -25,15 +26,15 @@ type Builder struct {
 	BuildArgs   map[string]string `json:"build_args,omitempty"` // 同时作为脚本的环境变量和 Docker 构建参数
 }
 
-const builderSelect = `SELECT b.id, b.name, v.name, b.repo_url, b.ref, b.context_path, COALESCE(b.dockerfile_text,''),
+const builderSelect = `SELECT b.id, b.name, v.name, COALESCE(t.name,''), b.repo_url, b.ref, b.context_path, COALESCE(b.dockerfile_text,''),
   COALESCE(b.script,''), b.image, b.profile, b.build_args
-  FROM builder b JOIN service v ON v.id = b.service_id `
+  FROM builder b JOIN service v ON v.id = b.service_id LEFT JOIN build_template t ON t.id = b.template_id `
 
 func scanBuilder(r scanner) (int64, Builder, error) {
 	var id int64
 	var b Builder
 	var args []byte
-	if err := r.Scan(&id, &b.Name, &b.Service, &b.RepoURL, &b.Ref, &b.ContextPath, &b.Dockerfile,
+	if err := r.Scan(&id, &b.Name, &b.Service, &b.Template, &b.RepoURL, &b.Ref, &b.ContextPath, &b.Dockerfile,
 		&b.Script, &b.Image, &b.Profile, &args); err != nil {
 		return 0, b, err
 	}
@@ -58,14 +59,30 @@ func nullStr(v string) any {
 	return v
 }
 
+// templateID 把模板名解析成 id;空名返回 NULL(builder 自带内容)。
+func (s *Store) templateID(ctx context.Context, name string) (any, error) {
+	if name == "" {
+		return nil, nil
+	}
+	var id int64
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM build_template WHERE name=?`, name).Scan(&id); err != nil {
+		return nil, fmt.Errorf("template %q: %w", name, notFound(err))
+	}
+	return id, nil
+}
+
 func (s *Store) CreateBuilder(ctx context.Context, b Builder) error {
 	var svcID int64
 	if err := s.db.QueryRowContext(ctx, `SELECT id FROM service WHERE name=?`, b.Service).Scan(&svcID); err != nil {
 		return fmt.Errorf("service %q: %w", b.Service, notFound(err))
 	}
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO builder(name, service_id, repo_url, ref, context_path, dockerfile_text, script, image, profile, build_args) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		b.Name, svcID, b.RepoURL, b.Ref, b.ContextPath, b.Dockerfile, nullStr(b.Script), b.Image, b.Profile, argsJSON(b.BuildArgs))
+	tplID, err := s.templateID(ctx, b.Template)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO builder(name, service_id, template_id, repo_url, ref, context_path, dockerfile_text, script, image, profile, build_args) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		b.Name, svcID, tplID, b.RepoURL, b.Ref, b.ContextPath, b.Dockerfile, nullStr(b.Script), b.Image, b.Profile, argsJSON(b.BuildArgs))
 	return err
 }
 
@@ -97,9 +114,13 @@ func (s *Store) ListBuilders(ctx context.Context, service string) ([]Builder, er
 
 // UpdateBuilder 修改构建器(名字和关联的服务不可改:历史运行引用着它;其余字段可以改,只影响之后的运行)。
 func (s *Store) UpdateBuilder(ctx context.Context, b Builder) error {
+	tplID, err := s.templateID(ctx, b.Template)
+	if err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE builder SET repo_url=?, ref=?, context_path=?, dockerfile_text=?, script=?, image=?, profile=?, build_args=? WHERE name=?`,
-		b.RepoURL, b.Ref, b.ContextPath, b.Dockerfile, nullStr(b.Script), b.Image, b.Profile, argsJSON(b.BuildArgs), b.Name)
+		`UPDATE builder SET template_id=?, repo_url=?, ref=?, context_path=?, dockerfile_text=?, script=?, image=?, profile=?, build_args=? WHERE name=?`,
+		tplID, b.RepoURL, b.Ref, b.ContextPath, b.Dockerfile, nullStr(b.Script), b.Image, b.Profile, argsJSON(b.BuildArgs), b.Name)
 	if err != nil {
 		return err
 	}
@@ -259,7 +280,7 @@ type Run struct {
 const runSelect = `SELECT r.id, p.name, b.name, v.name, e.name, r.ref, r.replicas, r.status, r.image, COALESCE(r.message,''),
   r.triggered_by, r.created_at, r.started_at, r.finished_at,
   r.cancel_requested, r.job_name, r.deploy_version, r.phase_started_at, p.steps, b.repo_url, b.context_path,
-  b.build_args, r.profile, b.image, COALESCE(r.script_text,''), COALESCE(r.dockerfile_text,'')
+  b.build_args, r.profile, r.build_image, COALESCE(r.script_text,''), COALESCE(r.dockerfile_text,'')
   FROM pipeline_run r JOIN pipeline p ON p.id=r.pipeline_id JOIN builder b ON b.id=r.builder_id
   JOIN service v ON v.id=b.service_id JOIN environment e ON e.id=r.env_id `
 
@@ -297,11 +318,16 @@ func scanRun(r scanner) (Run, error) {
 // CreateRun 创建一次运行:选定 builder 和 env;ref 不填则用 builder 的默认 ref。
 func (s *Store) CreateRun(ctx context.Context, actor, pipeline, builder, env, ref, profile string, replicas *int) (Run, error) {
 	var pID, bID, eID int64
-	var defRef, defProfile, script, dockerfile string
+	var defRef, defProfile, script, dockerfile, image string
 	if err := s.db.QueryRowContext(ctx, `SELECT id FROM pipeline WHERE name=?`, pipeline).Scan(&pID); err != nil {
 		return Run{}, fmt.Errorf("pipeline %q: %w", pipeline, notFound(err))
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT id, ref, profile, COALESCE(script,''), COALESCE(dockerfile_text,'') FROM builder WHERE name=?`, builder).Scan(&bID, &defRef, &defProfile, &script, &dockerfile); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT b.id, b.ref,
+	    CASE WHEN b.profile<>'' OR t.id IS NULL THEN b.profile ELSE t.profile END,
+	    CASE WHEN t.id IS NULL THEN COALESCE(b.script,'') ELSE COALESCE(t.script,'') END,
+	    CASE WHEN t.id IS NULL THEN COALESCE(b.dockerfile_text,'') ELSE t.dockerfile END,
+	    CASE WHEN t.id IS NULL THEN b.image ELSE t.image END
+	  FROM builder b LEFT JOIN build_template t ON t.id=b.template_id WHERE b.name=?`, builder).Scan(&bID, &defRef, &defProfile, &script, &dockerfile, &image); err != nil {
 		return Run{}, fmt.Errorf("builder %q: %w", builder, notFound(err))
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT id FROM environment WHERE name=?`, env).Scan(&eID); err != nil {
@@ -319,8 +345,8 @@ func (s *Store) CreateRun(ctx context.Context, actor, pipeline, builder, env, re
 		repl = *replicas
 	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO pipeline_run(pipeline_id, builder_id, env_id, ref, profile, replicas, triggered_by, script_text, dockerfile_text) VALUES (?,?,?,?,?,?,?,?,?)`,
-		pID, bID, eID, ref, profile, repl, actor, nullStr(script), dockerfile)
+		`INSERT INTO pipeline_run(pipeline_id, builder_id, env_id, ref, profile, replicas, triggered_by, script_text, dockerfile_text, build_image) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		pID, bID, eID, ref, profile, repl, actor, nullStr(script), dockerfile, image)
 	if err != nil {
 		return Run{}, err
 	}

@@ -11,6 +11,11 @@ import (
 )
 
 func (a *API) pipelineRoutes(m *http.ServeMux) {
+	m.HandleFunc("POST /v1/templates", a.createTemplate)
+	m.HandleFunc("GET /v1/templates", a.listTemplates)
+	m.HandleFunc("GET /v1/templates/{name}", a.getTemplate)
+	m.HandleFunc("PUT /v1/templates/{name}", a.updateTemplate)
+	m.HandleFunc("DELETE /v1/templates/{name}", a.deleteTemplate)
 
 	m.HandleFunc("POST /v1/builders", a.createBuilder)
 	m.HandleFunc("GET /v1/builders", a.listBuilders)
@@ -60,6 +65,34 @@ func validRelPath(p string) bool {
 
 const maxScriptBytes = 64 << 10
 
+// validateRecipe 校验一套构建配方(构建模板,或没引用模板的 builder 自带的内容)。
+// Dockerfile 的内容必填;构建脚本可选(不填就不跑脚本);有脚本就要有构建环境镜像,没脚本就不能填镜像。
+func validateRecipe(dockerfile, script, image, profile string) string {
+	if strings.TrimSpace(dockerfile) == "" {
+		return "dockerfile (the content of a single-stage Dockerfile) is required"
+	}
+	if len(dockerfile) > maxScriptBytes {
+		return "dockerfile is too large (max 64KB)"
+	}
+	if len(script) > maxScriptBytes {
+		return "script is too large (max 64KB)"
+	}
+	if script != "" {
+		if image == "" {
+			return "image (the build environment the script runs in, e.g. a maven or golang image) is required when a build script is set"
+		}
+	} else if image != "" {
+		return "image is only used together with a build script (it is the environment the script runs in)"
+	}
+	if image != "" && !imageRefRe.MatchString(image) {
+		return "invalid image reference: " + image
+	}
+	if !profileRe.MatchString(profile) {
+		return "profile may only contain [A-Za-z0-9._-], max 63 characters"
+	}
+	return ""
+}
+
 func normalizeBuilder(b *Builder) string {
 	if b.Ref == "" {
 		b.Ref = "master"
@@ -67,28 +100,16 @@ func normalizeBuilder(b *Builder) string {
 	if b.ContextPath == "" {
 		b.ContextPath = "."
 	}
-	// Dockerfile 和构建脚本的内容都存在数据库里。Dockerfile 必填;脚本可选(不填就不跑脚本)。
-	if strings.TrimSpace(b.Dockerfile) == "" {
-		return "dockerfile (the content of a single-stage Dockerfile) is required"
-	}
-	if len(b.Dockerfile) > maxScriptBytes {
-		return "dockerfile is too large (max 64KB)"
-	}
-	if len(b.Script) > maxScriptBytes {
-		return "script is too large (max 64KB)"
-	}
-	if b.Script != "" {
-		if b.Image == "" {
-			return "image (the build environment the script runs in, e.g. a maven or golang image) is required when a build script is set"
+	if b.Template != "" {
+		// 引用模板:脚本、Dockerfile、构建环境镜像都来自模板,builder 自己不能再写(避免"到底用哪个"的歧义);profile 可以覆盖模板的默认值
+		if b.Dockerfile != "" || b.Script != "" || b.Image != "" {
+			return "dockerfile, script and image come from the template: leave them empty when template is set (profile may still override)"
 		}
-	} else if b.Image != "" {
-		return "image is only used together with a build script (it is the environment the script runs in)"
-	}
-	if b.Image != "" && !imageRefRe.MatchString(b.Image) {
-		return "invalid image reference: " + b.Image
-	}
-	if !profileRe.MatchString(b.Profile) {
-		return "profile may only contain [A-Za-z0-9._-], max 63 characters"
+		if !profileRe.MatchString(b.Profile) {
+			return "profile may only contain [A-Za-z0-9._-], max 63 characters"
+		}
+	} else if msg := validateRecipe(b.Dockerfile, b.Script, b.Image, b.Profile); msg != "" {
+		return msg
 	}
 	if !validRelPath(strings.TrimPrefix(b.ContextPath, "./")) && b.ContextPath != "." {
 		return "context_path must be a relative path inside the repo (no .., no spaces)"
@@ -377,4 +398,79 @@ func (a *API) cancelRun(w http.ResponseWriter, r *http.Request) {
 	}
 	a.run.Kick()
 	writeJSON(w, http.StatusAccepted, run)
+}
+
+// ---- 构建模板 ----
+
+func (a *API) createTemplate(w http.ResponseWriter, r *http.Request) {
+	var in Template
+	if !decode(w, r, &in) || !validName(w, "template", in.Name, 63) {
+		return
+	}
+	if msg := validateRecipe(in.Dockerfile, in.Script, in.Image, in.Profile); msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
+		return
+	}
+	if err := a.store.CreateTemplate(r.Context(), in); err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, in)
+}
+
+func (a *API) listTemplates(w http.ResponseWriter, r *http.Request) {
+	v, err := a.store.ListTemplates(r.Context())
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+func (a *API) getTemplate(w http.ResponseWriter, r *http.Request) {
+	v, err := a.store.GetTemplate(r.Context(), r.PathValue("name"))
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+func (a *API) updateTemplate(w http.ResponseWriter, r *http.Request) {
+	var in Template
+	if !decode(w, r, &in) {
+		return
+	}
+	name := r.PathValue("name")
+	if in.Name != "" && in.Name != name {
+		writeErr(w, http.StatusBadRequest, "template name cannot be changed")
+		return
+	}
+	in.Name = name
+	if msg := validateRecipe(in.Dockerfile, in.Script, in.Image, in.Profile); msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
+		return
+	}
+	if err := a.store.UpdateTemplate(r.Context(), in); err != nil {
+		a.fail(w, err)
+		return
+	}
+	cur, err := a.store.GetTemplate(r.Context(), name)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cur)
+}
+
+func (a *API) deleteTemplate(w http.ResponseWriter, r *http.Request) {
+	err := a.store.DeleteTemplate(r.Context(), r.PathValue("name"))
+	if err != nil && conflictOnFK(w, err, "template is referenced by builders; it cannot be deleted") {
+		return
+	}
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
