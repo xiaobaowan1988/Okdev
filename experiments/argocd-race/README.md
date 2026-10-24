@@ -47,3 +47,17 @@ deployer 给每个 Application 的 `kustomize` 增加 `namespace: <目标命名�
 ## 复现
 素材在 fork 的 `race-experiment` 分支(`race/shared`、`race/copy-01..32`;该分支因 git 代理拒绝删除分支而仍留在远程)。需要先有 `apps` AppProject 与 Argo CD,
 然后 `./run-all.sh`(约 1 小时,可重复运行,已完成的 trial 会跳过)。
+
+## 上游反馈材料(`upstream/`)
+我的会话没有 `argoproj/argo-cd` 的 push 权限,GitHub API 也被会话绑定拦住(不能建 issue/PR、不能搜索上游 issue、不能建 fork),所以这里是准备好、可直接提交的材料,**尚未提交**:
+
+| 文件 | 内容 |
+|---|---|
+| `upstream/issue.md` | 按上游 bug_report 模板写好的 issue(英文),含根因、最小复现、对照实验数据、修复建议、未验证的部分 |
+| `upstream/fix.patch` | 修复(`AllowsConcurrentProcessing()` 加 `len(k.Replicas) == 0`)+ 单测;已在上游 master(Go 1.27.0)验证:新测试修复前失败、修复后通过,整个包通过,`go vet`/`gofmt` 干净 |
+| `upstream/pr.md` | 按上游 PR 模板写好的 PR 描述(DCO 等需要你本人完成的项没有替你勾) |
+
+提交步骤:
+1. **先查重**:在 https://github.com/argoproj/argo-cd/issues 搜 `AllowsConcurrentProcessing`、`kustomize replicas`、`kustomization.yaml is empty`(我无法搜索)。
+2. 补上 `argocd version` 输出,按 `issue.md` 开 issue。
+3. fork `argoproj/argo-cd`,在 fork 里:`git checkout -b fix-kustomize-replicas-concurrency && git apply fix.patch && git commit -s -m "fix: ..."`(`-s` 就是 DCO 签署,必须你本人),推送并按 `pr.md` 开 PR。
