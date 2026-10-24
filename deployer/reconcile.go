@@ -65,6 +65,12 @@ func destNamespace(x EnvService) string { return x.Env + "-env-" + x.Service }
 func (r *Reconciler) desiredApp(x EnvService) *unstructured.Unstructured {
 	kustomize := map[string]any{
 		"replicas": []any{map[string]any{"name": x.Workload, "count": int64(x.Replicas)}},
+		// 必须设置:Argo CD 渲染带 replicas 的 kustomize 应用时,会在共享检出目录里执行 `kustomize edit set replicas`,
+		// 但它判断"能否并发渲染"的 AllowsConcurrentProcessing() 漏了 Replicas(v3.5.6 与 master 都是),
+		// 于是多个 Application 同时渲染同一路径会互相踩 kustomization.yaml:渲染出别人的副本数(还显示 Synced)或报错。
+		// namespace 在它的检查清单里,设成目标命名空间(与 destination 相同,对资源没有语义影响)就会让渲染取排他锁。
+		// 实验见 experiments/argocd-race:不设时 6/6 次出问题,设了 3/3 次全部正确。
+		"namespace": destNamespace(x),
 	}
 	if x.Image != "" && x.ImageName != "" {
 		kustomize["images"] = []any{x.ImageName + "=" + x.Image}

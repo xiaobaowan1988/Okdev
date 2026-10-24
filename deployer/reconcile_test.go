@@ -49,6 +49,10 @@ func TestDesiredApp(t *testing.T) {
 		t.Fatalf("bad dest %v", spec["destination"])
 	}
 	k := spec["source"].(map[string]any)["kustomize"].(map[string]any)
+	// 必须带 namespace,否则 Argo CD 会并发渲染并互相覆盖 kustomization.yaml(见 experiments/argocd-race)
+	if k["namespace"] != "dev1-env-web" {
+		t.Fatalf("kustomize.namespace must equal the destination namespace to force exclusive rendering, got %v", k["namespace"])
+	}
 	if k["replicas"].([]any)[0].(map[string]any)["count"] != int64(0) || k["images"].([]any)[0] != "r/nginx=r/nginx:1" {
 		t.Fatalf("bad kustomize %v", k)
 	}

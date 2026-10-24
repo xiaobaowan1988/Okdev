@@ -75,11 +75,10 @@ curl -X POST $A/v1/envs/dev1/services/web/scale -d '{"replicas":2}'
 ## 实测中发现的问题
 1. **死锁(已修)**:并发首次部署时,对不存在的行 `SELECT ... FOR UPDATE` 会在唯一索引上加间隙锁,两个事务各持锁再 INSERT 互相死锁(MySQL 1213),
    12 个并发里有 2 个返回 500。修法:先 `INSERT ... ON DUPLICATE KEY UPDATE id=id` 让行存在再锁行,并对 1213/1205 做有限次重试。
-2. **渲染出错误副本数(原因未确认,已加防护)**:第一轮测试里 `dev1` 期望 1 个副本,Argo CD 同步到集群的却是 0,还报 Synced/Healthy;
-   硬刷新后变成 1。Application 里的参数是对的,数据库也对。怀疑是多个 Application 同时从同一路径渲染、各带不同 kustomize 副本数覆盖时
-   的并发问题(见文末"再简化"一节里第二次观察),**没有证据确认根因**。防护:deployer 的副本数校验(见"对账循环"),不依赖根因是否查清。
-   验证过:停掉 Argo CD 控制器 + 手动改实际副本数 → deployer 在 ~一轮内标出 `ReplicaMismatch`、硬刷新 1 次、持续后打 ERROR;恢复控制器后自动回到 Healthy。
-   没验证的:真实的并发渲染错误本身(这次是人为制造的不一致,验证的是"能发现并告警",不是"根治");"Unknown 卡住就刷新"那条路径只有单测,没有在集群里制造过。
+2. **并发渲染互相覆盖(根因已查明并缓解)**:多个 Application 同时从同一路径渲染、各带不同 `kustomize.replicas` 时,Argo CD 会渲染出别人的副本数(还报 Synced/Healthy)或报错。
+   根因是 Argo CD 的 `AllowsConcurrentProcessing()` 漏了 `Replicas`(v3.5.6 与 master 一致),见 [experiments/argocd-race](../experiments/argocd-race/README.md):
+   原做法 6/6 次出问题,加 `kustomize.namespace` 后 3/3 次全部正确。缓解已落地:每个 Application 都带 `kustomize.namespace`=目标命名空间(语义无变化,强制独占渲染)。
+   副本数校验(见"对账循环")仍保留,作为不依赖该缓解的兜底。结论的强度与未证明的部分见实验报告。
 
 ## 原型的局限
 - MySQL 单实例、数据在节点 hostPath;生产要托管/主从、备份与恢复演练。
@@ -115,7 +114,7 @@ curl -X POST $A/v1/envs/dev1/services/web/scale -d '{"replicas":2}'
 所以 deployer 默认 `APP_NAMESPACE=argocd`,RBAC 改为 `argocd` 命名空间,`manifests/argocd/base` 不再有任何补丁(只剩官方 install.yaml)。
 线上切换同样是:deployer 缩到 0 → 删 `argocd-apps` 里的 Application 并等级联清理 → 删命名空间 → 应用新配置并重启控制器 → 新版 deployer 按数据库重建全部 20 个 Application。
 
-**切换中又观察到一次渲染问题**:重建后 `app-b-dev1`、`app-b-dev3` 一度显示 `Unknown`,错误是
+**切换中又观察到一次渲染问题(根因见上文第 2 点)**:重建后 `app-b-dev1`、`app-b-dev3` 一度显示 `Unknown`,错误是
 `kustomize build .../demo/app-b failed: resource with name app-b does not match a ...`,而同路径的 `app-b-dev2` 正常;约 2 分钟内自行恢复。
 这和前面 `dev1` 渲染成 0 副本是同一类现象,共同点是**多个 Application 同时从同一个路径渲染、各带 kustomize 副本数覆盖**。
 我的推断(未验证):repo-server 对同一份检出执行 `kustomize edit set replicas` 再 `kustomize build`,并发时会读到被另一个进程改写的 `kustomization.yaml`。
