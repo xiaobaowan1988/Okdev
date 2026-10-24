@@ -51,6 +51,7 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443   # https://localhost:
 "哪个应用部署到哪些环境、副本数多少、镜像是什么"存在 MySQL,Go 程序 deployer 对账后创建 Argo CD Application。
 环境是数据(几行记录),不是文件:新增环境、把应用推广/迁移到别的环境都是一次 API 调用,不用改仓库。
 详见 [deployer/README.md](deployer/README.md)(设计、API、实测结果、发现的问题、局限)。
+**加一个服务**:放一份 kustomize 清单 → `POST /v1/services` 登记 → `PUT /v1/envs/{env}/services/{svc}` 部署到环境,步骤和演示见 [deployer/README.md 的「添加一个服务」](deployer/README.md)。
 ```bash
 ./scripts/deploy-mysql.sh && ./scripts/build-deployer.sh && kubectl apply -k manifests/deployer/app
 ```

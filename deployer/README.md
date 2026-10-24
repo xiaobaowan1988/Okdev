@@ -23,6 +23,8 @@
 POST   /v1/envs                                {"name":"dev3"}           # 名字 ≤20,[a-z0-9-]
 DELETE /v1/envs/{env}                                                         # 还有部署时 409
 POST   /v1/services                            {"name","repo_url","path","revision?","workload?","image_name?"}
+PUT    /v1/services/{name}                     {"repo_url","path","revision?","workload?","image_name?"}   # 改服务定义(名字不可改);它所有部署的 version +1 并各写一条 service-update 历史
+DELETE /v1/services/{name}                                                                                  # 还有部署时 409
 PUT    /v1/envs/{env}/services/{svc}           {"replicas?","image?","expected_version?"}   # 部署/更新(幂等)
 POST   /v1/envs/{env}/services/{svc}/scale     {"replicas","expected_version?"}             # 副本数 0..50,必须已存在
 DELETE /v1/envs/{env}/services/{svc}                                                         # 下线
@@ -30,6 +32,35 @@ GET    /v1/envs/{env}/services                                                  
 GET    /v1/envs/{env}/services/{svc}/history
 ```
 `X-Actor` 头记录操作人;配置了 `API_TOKEN`(Secret `deployer-api`)则要求 `Authorization: Bearer`,**原型默认不开鉴权**。
+
+## 添加一个服务(以 `api` 为例)
+不需要写 Application、ApplicationSet,也不需要按环境建文件,三步:**放清单 → 登记服务 → 部署到环境**。
+
+1. **清单**:在 fork 的 `demo/<服务>/` 放一个 **kustomize 目录**(`kustomization.yaml` + Deployment + Service),一份,不分环境。约束:
+   必须有 `kustomization.yaml`(副本数/镜像是通过 kustomize 参数传的);工作负载必须是 **Deployment**,名字默认等于服务名(否则登记时给 `workload`);
+   只放带命名空间的资源(AppProject 只放行 `Namespace` 这一种集群级资源);清单里写默认镜像和副本数,环境差异由 deployer 覆盖。
+2. **登记**:`POST /v1/services`。要按环境覆盖镜像,`image_name` 填清单里的镜像名(不带 tag)。登记错了用 `PUT /v1/services/{name}` 改。
+3. **部署**:`PUT /v1/envs/{env}/services/{svc}`,带 `replicas` 和/或 `image`;环境不存在先 `POST /v1/envs`。几秒后看 `GET /v1/envs/{env}/services` 的 `observed_*`。
+
+演示服务 `api`(`examples/api`,一个返回版本号和 Pod 名的 Go 服务;`scripts/build-example-api.sh v1|v2` 构建并导入集群,清单在 fork 的 `demo/api`):
+```bash
+A=http://127.0.0.1:18080
+curl -X POST $A/v1/services -d '{"name":"api","repo_url":"https://github.com/xiaobaowan1988/argocd-example-apps.git","path":"demo/api","image_name":"api"}'
+curl -X POST $A/v1/envs -d '{"name":"dev3"}'
+curl -X PUT  $A/v1/envs/dev3/services/api -d '{"replicas":1,"image":"api:v1"}'    # 只在 dev3 调试
+curl -X PUT  $A/v1/envs/dev5/services/api -d '{"replicas":2,"image":"api:v2"}'    # 别的环境跑别的版本
+curl -X PUT  $A/v1/envs/dev7/services/api -d '{"replicas":0,"image":"api:v1"}'    # 部署了,但副本数 0
+```
+**实测**(在本集群):`dev3` 响应 `{"version":"v1"}`、`dev5`(2 副本)响应 `{"version":"v2"}`、`dev7`(0 副本)连接被拒(没有后端 Pod);
+再单独把 `dev3` 的镜像改成 `api:v2`,滚动升级后它响应 `v2`,不影响其它环境;`dev5` 扩到 3 副本后 3/3 就绪。
+故意把 `path` 写成 `demo/apii`:错误 `app path does not exist` 回显在 `observed_message`,用 `PUT /v1/services/api` 改正后该部署的 `version` 1→2、自动恢复 Synced/Healthy,
+历史里有 `create` 和 `service-update` 两条。服务删除:有部署时 409,先下线部署再删得 204,再删得 404;改名 400;缺 `repo_url`/`path` 400;不存在的服务 404。
+
+**注意**:
+- 服务在别的仓库时,AppProject `apps` 的 `sourceRepos`(`manifests/apps/appproject.yaml`)目前只有 fork 一个地址,要先加上;私有仓库还要登记凭据(现在的 `repo.yaml` 只适用公共仓库)。
+- 镜像必须能被集群拉到。这里没有 CI 和镜像仓库,`api` 的镜像是本机构建后导入单节点集群的 containerd(`imagePullPolicy` 默认 IfNotPresent),多节点或真实环境要推到镜像仓库。
+- 命名限制:服务名 ≤30、环境名 ≤20,`[a-z0-9-]`;命名空间 `<环境>-env-<服务>` 总长 ≤63。
+- 服务定义一改,它所有环境的部署都会跟着变(期望状态里的仓库/路径/镜像名/工作负载都来自服务定义)。
 
 ## 对账循环(`reconcile.go`)
 - 每 10 秒一轮,API 写入后立即触发。多副本时用 MySQL `GET_LOCK` 选主,只有一个干活;leader 挂了锁随连接释放。

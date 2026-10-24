@@ -28,6 +28,8 @@ func (a *API) routes() http.Handler {
 	m.HandleFunc("DELETE /v1/envs/{env}", a.deleteEnv)
 	m.HandleFunc("POST /v1/services", a.createService)
 	m.HandleFunc("GET /v1/services", a.listServices)
+	m.HandleFunc("PUT /v1/services/{name}", a.updateService)
+	m.HandleFunc("DELETE /v1/services/{name}", a.deleteService)
 	m.HandleFunc("GET /v1/envs/{env}/services", a.listEnvServices)
 	m.HandleFunc("PUT /v1/envs/{env}/services/{svc}", a.putEnvService)
 	m.HandleFunc("POST /v1/envs/{env}/services/{svc}/scale", a.scale)
@@ -159,6 +161,49 @@ func (a *API) createService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, in)
+}
+
+func (a *API) updateService(w http.ResponseWriter, r *http.Request) {
+	var in Service
+	if !decode(w, r, &in) {
+		return
+	}
+	name := r.PathValue("name")
+	if in.Name != "" && in.Name != name {
+		writeErr(w, http.StatusBadRequest, "service name cannot be changed")
+		return
+	}
+	in.Name = name
+	if in.RepoURL == "" || in.Path == "" {
+		writeErr(w, http.StatusBadRequest, "repo_url and path are required")
+		return
+	}
+	if in.Revision == "" {
+		in.Revision = "HEAD"
+	}
+	if in.Workload == "" {
+		in.Workload = in.Name
+	}
+	if err := a.store.UpdateService(r.Context(), actor(r), in); err != nil {
+		a.fail(w, err)
+		return
+	}
+	a.rec.Kick() // 服务定义变了,已有部署的 Application 需要尽快更新
+	writeJSON(w, http.StatusOK, in)
+}
+
+func (a *API) deleteService(w http.ResponseWriter, r *http.Request) {
+	err := a.store.DeleteService(r.Context(), r.PathValue("name"))
+	var me *mysql.MySQLError
+	if errors.As(err, &me) && me.Number == 1451 { // 外键:还有部署引用这个服务
+		writeErr(w, http.StatusConflict, "service still has deployments; remove them first")
+		return
+	}
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *API) listServices(w http.ResponseWriter, r *http.Request) {

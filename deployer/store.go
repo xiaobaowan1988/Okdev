@@ -172,6 +172,72 @@ func (s *Store) CreateService(ctx context.Context, v Service) error {
 	return err
 }
 
+// UpdateService 修改服务定义(名字不可改)。服务定义变了,它所有部署的期望状态也就变了:
+// 提升这些部署的 version(使旧的 expected_version 失效,也让对账循环重新核对),并给每个部署写一条历史。
+func (s *Store) UpdateService(ctx context.Context, actor string, v Service) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var id int64
+	var before Service
+	before.Name = v.Name
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id, repo_url, path, revision, workload, image_name FROM service WHERE name=? FOR UPDATE`, v.Name,
+	).Scan(&id, &before.RepoURL, &before.Path, &before.Revision, &before.Workload, &before.ImageName); err != nil {
+		return notFound(err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE service SET repo_url=?, path=?, revision=?, workload=?, image_name=? WHERE id=?`,
+		v.RepoURL, v.Path, v.Revision, v.Workload, v.ImageName, id); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT e.name FROM env_service es JOIN environment e ON e.id=es.env_id WHERE es.service_id=?`, id)
+	if err != nil {
+		return err
+	}
+	var envs []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return err
+		}
+		envs = append(envs, n)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	bj, _ := json.Marshal(before)
+	aj, _ := json.Marshal(v)
+	for _, env := range envs {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO deploy_history(env_name, service_name, actor, action, before_state, after_state) VALUES (?,?,?,?,?,?)`,
+			env, v.Name, actor, "service-update", string(bj), string(aj)); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE env_service SET version=version+1 WHERE service_id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DeleteService 删除服务定义:还有部署引用它时数据库(外键)会拒绝,由 API 转成 409。
+func (s *Store) DeleteService(ctx context.Context, name string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM service WHERE name=?`, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) ListServices(ctx context.Context) ([]Service, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT name, repo_url, path, revision, workload, image_name FROM service ORDER BY id`)
 	if err != nil {
