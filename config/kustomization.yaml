@@ -3,5 +3,6 @@ kind: Kustomization
 resources:
   - crd/releasetasks.yaml
   - rbac/rbac.yaml
+  - rbac/developer.yaml
   - manager/deployment.yaml
   - manager/service.yaml

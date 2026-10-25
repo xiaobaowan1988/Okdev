@@ -1,0 +1,20 @@
+# 开发人员角色:配合内置的 view(只读工作负载/Pod/日志/事件,不含 Secret)使用。
+# view 之外还需要:列出环境(Namespace)、进入容器终端、创建/查看发布任务。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: okdev-developer
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+  - apiGroups: [ci.okdev.io]
+    resources: [releasetasks]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [""]
+    resources: [services/proxy]
+    resourceNames: ["okdev-controller:http"]
+    verbs: [get]

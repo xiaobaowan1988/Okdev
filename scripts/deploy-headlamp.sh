@@ -9,6 +9,6 @@ kubectl create ns okdev-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n okdev-system create configmap okdev-plugin \
   --from-file=main.js="$P/dist/main.js" --from-file=package.json="$P/package.json" \
   --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -f "$DIR/deploy/headlamp/headlamp.yaml"
+kubectl apply -k "${HEADLAMP_OVERLAY:-$DIR/deploy/headlamp}"
 kubectl -n okdev-system rollout restart deploy/headlamp >/dev/null
 kubectl -n okdev-system rollout status deploy/headlamp --timeout=180s

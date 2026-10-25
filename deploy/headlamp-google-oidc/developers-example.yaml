@@ -1,0 +1,18 @@
+# 示例(不被 kustomization 引用,按需 kubectl apply):给指定 Google 账号授权。
+# Google 的 ID Token 没有群组信息,只能按邮箱逐个授权;用户名带 API Server 的 --oidc-username-prefix(这里是 "google:")。
+# 要按组授权,需在前面接 Dex(Google connector)或使用 Google Workspace 群组同步,见 README。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: okdev-developers}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: okdev-developer}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: "google:alice@okcoin.jp"}
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: "google:bob@okcoin.jp"}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: okdev-developers-view}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: "google:alice@okcoin.jp"}
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: "google:bob@okcoin.jp"}

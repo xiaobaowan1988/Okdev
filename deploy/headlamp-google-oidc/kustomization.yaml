@@ -1,0 +1,29 @@
+# Headlamp 改用 Google 登录(OIDC)。先创建 Secret(不要提交到仓库):
+#   kubectl -n okdev-system create secret generic headlamp-google-oidc \
+#     --from-literal=client-id=<id>.apps.googleusercontent.com --from-literal=client-secret=<secret>
+# 把下面 callback-url 的域名换成 Headlamp 实际对外地址;它必须与 Google Cloud 控制台里
+# 该 OAuth 客户端的「已获授权的重定向 URI」完全一致。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../headlamp
+patches:
+  - target: {kind: Deployment, name: headlamp}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/args
+        value:
+          - -in-cluster
+          - -plugins-dir=/headlamp/plugins
+          - -oidc-use-pkce
+          - -oidc-auto-login
+      - op: add
+        path: /spec/template/spec/containers/0/env
+        value:
+          - {name: HEADLAMP_CONFIG_OIDC_IDP_ISSUER_URL, value: "https://accounts.google.com"}
+          - {name: HEADLAMP_CONFIG_OIDC_SCOPES, value: "openid,email,profile"}
+          - {name: HEADLAMP_CONFIG_OIDC_CALLBACK_URL, value: "https://headlamp.example.com/oidc-callback"}
+          - name: HEADLAMP_CONFIG_OIDC_CLIENT_ID
+            valueFrom: {secretKeyRef: {name: headlamp-google-oidc, key: client-id}}
+          - name: HEADLAMP_CONFIG_OIDC_CLIENT_SECRET
+            valueFrom: {secretKeyRef: {name: headlamp-google-oidc, key: client-secret}}
