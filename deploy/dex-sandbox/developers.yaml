@@ -1,0 +1,13 @@
+# 沙箱示例:只授权 alice;bob 能登录但没有任何权限(用来验证"登录 ≠ 授权")。
+# 用户名 = API Server 的 --oidc-username-prefix("dex:") + 邮箱。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: okdev-developers}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: okdev-developer}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: "dex:alice@okcoin.jp"}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: okdev-developers-view}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: "dex:alice@okcoin.jp"}]

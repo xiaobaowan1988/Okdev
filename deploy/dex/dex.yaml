@@ -1,0 +1,59 @@
+# Dex:把 Zadig 账号导出成的静态账号,以标准 OIDC 提供给 Headlamp 和 kube-apiserver。
+# 配置(含密码哈希)在 Secret dex-config,由 scripts/deploy-dex.sh 生成,不入库。
+# TLS 证书在 Secret dex-tls(kube-apiserver 要求 issuer 是 https)。
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: dex, namespace: okdev-system}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: okdev-dex}
+rules:
+  # storage.type=kubernetes:Dex 把授权码、刷新令牌等存成自己的 CRD,重启不丢登录态
+  - apiGroups: [dex.coreos.com]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: okdev-dex}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: okdev-dex}
+subjects: [{kind: ServiceAccount, name: dex, namespace: okdev-system}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: dex, namespace: okdev-system}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: dex}}
+  template:
+    metadata: {labels: {app: dex}}
+    spec:
+      serviceAccountName: dex
+      containers:
+        - name: dex
+          image: ghcr.io/dexidp/dex:v2.41.1
+          args: [dex, serve, /etc/dex/config.yaml]
+          env:
+            - name: HEADLAMP_CLIENT_SECRET
+              valueFrom: {secretKeyRef: {name: dex-client, key: headlamp-secret}}
+          ports: [{name: https, containerPort: 5556}]
+          readinessProbe: {httpGet: {path: /healthz, port: 5556, scheme: HTTPS}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/dex, readOnly: true}
+            - {name: tls, mountPath: /etc/dex/tls, readOnly: true}
+      volumes:
+        - name: config
+          secret: {secretName: dex-config}
+        - name: tls
+          secret: {secretName: dex-tls}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: dex, namespace: okdev-system}
+spec:
+  selector: {app: dex}
+  ports: [{name: https, port: 5556, targetPort: 5556}]

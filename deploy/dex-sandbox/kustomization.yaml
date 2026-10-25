@@ -1,0 +1,9 @@
+# 沙箱:用 NodePort 30556 暴露,issuer 是 https://<节点IP>:30556(浏览器、Headlamp、kube-apiserver 都能访问同一个地址)。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [../dex]
+patches:
+  - target: {kind: Service, name: dex}
+    patch: |-
+      - {op: replace, path: /spec/type, value: NodePort}
+      - {op: add, path: /spec/ports/0/nodePort, value: 30556}

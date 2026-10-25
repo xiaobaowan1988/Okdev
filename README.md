@@ -82,7 +82,7 @@ kubectl create ns dev   # 并把 build-ca ConfigMap 复制进 dev(沙箱出口 H
 - **`/workflows/:namespace/:name`(任务详情)**:状态条(Pending → Running → Success/Failed)、失败原因、基本信息、按时间排序的 K8s Events 时间线、按步骤(checkout / prepare / build / release)分页的实时日志(`executorPodName` 出现后才加载,未开始的步骤显示"尚未开始";任务结束后停止 follow)。
   与设计文档的差异:路径多了 namespace,因为 `ReleaseTask` 是命名空间级资源。
 - 侧边栏底部的 "Create" 按钮也隐藏了(无官方开关,用 `MutationObserver` 只隐藏侧边栏抽屉里的那个,原生详情页里的按钮不受影响)。
-- 登录:默认粘贴 ServiceAccount token;接入 Google 账号登录见 [docs/google-auth.md](docs/google-auth.md)(`deploy/headlamp-google-oidc`)。
+- 登录:默认粘贴 ServiceAccount token;接入 Google 账号登录见 [docs/google-auth.md](docs/google-auth.md)(`deploy/headlamp-google-oidc`);沿用 Zadig 账号(导出到 Dex)见 [docs/zadig-accounts-dex.md](docs/zadig-accounts-dex.md)(`cmd/zadig-export`、`deploy/dex`、`deploy/headlamp-dex`)。
 - 开发:`cd headlamp-plugin/okdev-console && npm install && npm run build|tsc|lint`。
 - 部署到集群:`scripts/deploy-headlamp.sh`(构建 → ConfigMap → 集群内 Headlamp),`kubectl -n okdev-system port-forward svc/headlamp 4466:80`,用 ServiceAccount token 登录。
 - 端到端脚本 `headlamp-plugin/e2e/`(Playwright,`TOKEN_FILE` 指向 token 文件):`node services.js`、`node workflows.js`(单服务,选已有分支)、`node multi-service.js`(多服务)。

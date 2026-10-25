@@ -1,0 +1,37 @@
+# Headlamp 通过 Dex 登录(Dex 里是从 Zadig 导出的账号)。前提:已用 scripts/deploy-dex.sh 部署 Dex。
+# 把 issuer 和 callback-url 换成真实地址:
+#   issuer       必须与 Dex 配置里的 issuer 完全一致,且浏览器、Headlamp、kube-apiserver 都能访问
+#   callback-url 必须与 Dex 的 staticClients.redirectURIs 完全一致
+# Dex 用自签或私有 CA 时,把 CA 放进 ConfigMap dex-ca(key: ca.crt),并保留下面的 -oidc-ca-file;公共 CA 签发的证书可删掉这几处。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../headlamp
+patches:
+  - target: {kind: Deployment, name: headlamp}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/args
+        value:
+          - -in-cluster
+          - -plugins-dir=/headlamp/plugins
+          - -oidc-use-pkce
+          - -oidc-auto-login
+          - -oidc-ca-file=/etc/dex-ca/ca.crt
+      - op: add
+        path: /spec/template/spec/containers/0/env
+        value:
+          - {name: HEADLAMP_CONFIG_OIDC_IDP_ISSUER_URL, value: "https://dex.example.com"}
+          - {name: HEADLAMP_CONFIG_OIDC_SCOPES, value: "openid,email,profile"}
+          - {name: HEADLAMP_CONFIG_OIDC_CALLBACK_URL, value: "https://headlamp.example.com/oidc-callback"}
+          - {name: HEADLAMP_CONFIG_OIDC_CLIENT_ID, value: headlamp}
+          - name: HEADLAMP_CONFIG_OIDC_CLIENT_SECRET
+            valueFrom: {secretKeyRef: {name: dex-client, key: headlamp-secret}}
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value: {name: dex-ca, mountPath: /etc/dex-ca, readOnly: true}
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: dex-ca
+          configMap: {name: dex-ca}
