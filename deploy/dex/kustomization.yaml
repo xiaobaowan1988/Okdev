@@ -1,3 +1,8 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources: [dex.yaml]
+# 登录页:Dex 默认标签是 "Email Address",这里改成"用户名或邮箱"(只替换 password.html 这一个模板)
+configMapGenerator:
+  - name: dex-login-page
+    namespace: okdev-system
+    files: [password.html]

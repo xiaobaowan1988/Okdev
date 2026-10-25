@@ -23,7 +23,7 @@ type Account struct {
 	Password string // bcrypt 哈希
 }
 
-// StaticPassword 是 Dex 配置里 staticPasswords 的一项。
+// StaticPassword 是 Dex 配置里 staticPasswords 的一项。Email 是登录名,可以是用户名也可以是邮箱。
 type StaticPassword struct {
 	Email    string `json:"email"`
 	Hash     string `json:"hash"`
@@ -60,34 +60,47 @@ func Query(ctx context.Context, db *sql.DB, identityType string) ([]Account, err
 	return out, rows.Err()
 }
 
-// Convert 把账号转成 Dex 静态账号。不能安全导出的账号会被跳过并给出原因,而不是悄悄丢掉或导出坏数据:
-//   - 没有 bcrypt 密码哈希(例如密码为空);
-//   - 没有邮箱(Dex 用邮箱登录,K8s 也用邮箱当用户名);
-//   - 邮箱和已导出的账号重复(Dex 要求邮箱唯一)。
+// Convert 把账号转成 Dex 静态账号。Dex 把静态账号的 email 字段当登录名,所以每个 Zadig 账号最多生成两条:
+// 一条以用户名登录,一条以邮箱登录;两条的 username 都是 Zadig 账号名、userID 相同,
+// kube-apiserver 用 preferred_username(= 账号名)当用户名,所以无论用哪个登录,RBAC 里都是同一个人。
+//
+// 不能安全导出的会跳过并给出原因,而不是悄悄丢掉或导出坏数据:
+//   - 没有 bcrypt 密码哈希(例如密码为空):整个账号跳过;
+//   - 用户名/邮箱与已导出的登录名冲突(Dex 要求登录名唯一):该登录名跳过;邮箱缺失或格式不对同理(此时仍可用用户名登录)。
 func Convert(accounts []Account) ([]StaticPassword, []Skipped) {
 	var out []StaticPassword
 	var skipped []Skipped
-	seen := map[string]string{}
+	seen := map[string]string{} // 登录名(小写) -> 占用它的 Zadig 账号
+	add := func(a Account, login, kind string) {
+		login = strings.ToLower(strings.TrimSpace(login))
+		if prev, dup := seen[login]; dup {
+			skipped = append(skipped, Skipped{a.Account, fmt.Sprintf("%s %q already used by %s, login by %s not available", kind, login, prev, kind)})
+			return
+		}
+		seen[login] = a.Account
+		out = append(out, StaticPassword{Email: login, Hash: a.Password, Username: a.Account, UserID: a.UID})
+	}
 	for _, a := range accounts {
-		email := strings.ToLower(strings.TrimSpace(a.Email))
-		switch {
-		case !isBcrypt(a.Password):
+		if !isBcrypt(a.Password) {
 			skipped = append(skipped, Skipped{a.Account, "no bcrypt password hash"})
 			continue
-		case email == "" || !strings.Contains(email, "@"):
-			skipped = append(skipped, Skipped{a.Account, "no valid email"})
+		}
+		if strings.TrimSpace(a.Account) == "" {
+			skipped = append(skipped, Skipped{a.UID, "empty account name"})
 			continue
 		}
-		if prev, dup := seen[email]; dup {
-			skipped = append(skipped, Skipped{a.Account, fmt.Sprintf("email %s already used by %s", email, prev)})
-			continue
+		add(a, a.Account, "username")
+		email := strings.TrimSpace(a.Email)
+		switch {
+		case email == "":
+			skipped = append(skipped, Skipped{a.Account, "no email, login by email not available"})
+		case !strings.Contains(email, "@"):
+			skipped = append(skipped, Skipped{a.Account, "invalid email, login by email not available"})
+		case strings.EqualFold(email, a.Account):
+			// 用户名就是邮箱,上面已经生成
+		default:
+			add(a, email, "email")
 		}
-		seen[email] = a.Account
-		name := a.Name
-		if name == "" {
-			name = a.Account
-		}
-		out = append(out, StaticPassword{Email: email, Hash: a.Password, Username: name, UserID: a.UID})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Email < out[j].Email })
 	return out, skipped

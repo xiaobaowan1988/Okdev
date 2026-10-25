@@ -47,8 +47,12 @@ func main() {
 		os.Exit(1)
 	}
 	os.Stdout.Write(out)
-	fmt.Fprintf(os.Stderr, "exported %d of %d accounts\n", len(exported), len(accounts))
+	logins := map[string]bool{}
+	for _, e := range exported {
+		logins[e.UserID] = true
+	}
+	fmt.Fprintf(os.Stderr, "exported %d login names for %d of %d accounts\n", len(exported), len(logins), len(accounts))
 	for _, s := range skipped {
-		fmt.Fprintf(os.Stderr, "skipped %s: %s\n", s.Account, s.Reason)
+		fmt.Fprintf(os.Stderr, "note %s: %s\n", s.Account, s.Reason)
 	}
 }

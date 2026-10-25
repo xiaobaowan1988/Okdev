@@ -11,6 +11,9 @@ oauth2:
   skipApprovalScreen: true
   # 只用授权码 + 刷新令牌,不开放密码模式
   responseTypes: [code]
+# 不设置 dir 时 Dex 用内置模板;设置后才会读 /srv/dex/web,从而应用挂载进来的自定义 password.html
+frontend:
+  dir: /srv/dex/web
 enablePasswordDB: true
 expiry:
   idTokens: 8h          # Headlamp 把 ID Token 交给 kube-apiserver,有效期决定多久要重新登录

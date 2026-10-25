@@ -45,11 +45,14 @@ spec:
           volumeMounts:
             - {name: config, mountPath: /etc/dex, readOnly: true}
             - {name: tls, mountPath: /etc/dex/tls, readOnly: true}
+            - {name: login-page, mountPath: /srv/dex/web/templates/password.html, subPath: password.html, readOnly: true}
       volumes:
         - name: config
           secret: {secretName: dex-config}
         - name: tls
           secret: {secretName: dex-tls}
+        - name: login-page
+          configMap: {name: dex-login-page}
 ---
 apiVersion: v1
 kind: Service
