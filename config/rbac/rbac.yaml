@@ -3,16 +3,24 @@ kind: Namespace
 metadata:
   name: okdev-system
 ---
+# 发布任务只在这个命名空间里生效:控制器只监听它,研发只在这里有创建权限
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: okdev-releases
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: okdev-controller
   namespace: okdev-system
 ---
+# 控制器只读写发布任务和事件;构建、部署由 deployer 完成,所以不需要 Job、Pod 等权限
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: okdev-controller
+  namespace: okdev-releases
 rules:
   - apiGroups: [ci.okdev.io]
     resources: [releasetasks]
@@ -20,50 +28,32 @@ rules:
   - apiGroups: [ci.okdev.io]
     resources: [releasetasks/status]
     verbs: [get, update, patch]
-  - apiGroups: [batch]
-    resources: [jobs]
-    verbs: [get, list, watch, create]
-  # 创建带 ownerReference 的 Job 时,准入要求对属主有 finalizers 更新权限
-  - apiGroups: [ci.okdev.io]
-    resources: [releasetasks/finalizers]
-    verbs: [update]
-  - apiGroups: [""]
-    resources: [pods]
-    verbs: [get, list, watch]
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: okdev-controller
+  namespace: okdev-releases
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: okdev-controller}
+subjects: [{kind: ServiceAccount, name: okdev-controller, namespace: okdev-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: okdev-leader-election
+  namespace: okdev-system
+rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, create, update]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: okdev-controller
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: okdev-controller
-subjects:
-  - kind: ServiceAccount
-    name: okdev-controller
-    namespace: okdev-system
----
-# 研发人员:能创建和查看 ReleaseTask(Headlamp 里"点击运行"所需),不能改 status
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: okdev-releasetask-editor
-rules:
-  - apiGroups: [ci.okdev.io]
-    resources: [releasetasks]
-    verbs: [get, list, watch, create, delete]
-  - apiGroups: [""]
-    resources: [events]
-    verbs: [get, list, watch]
-  # 运行工作流表单通过服务代理读取仓库的分支/Tag 列表
-  - apiGroups: [""]
-    resources: [services/proxy]
-    resourceNames: ["okdev-controller:http"]
-    verbs: [get]
+  name: okdev-leader-election
+  namespace: okdev-system
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: okdev-leader-election}
+subjects: [{kind: ServiceAccount, name: okdev-controller, namespace: okdev-system}]

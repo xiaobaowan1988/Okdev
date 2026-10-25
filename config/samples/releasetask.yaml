@@ -1,15 +1,10 @@
 apiVersion: ci.okdev.io/v1
 kind: ReleaseTask
 metadata:
-  generateName: guestbook-
-  namespace: dev
+  generateName: api-
+  namespace: okdev-releases
 spec:
-  service: {name: guestbook-ui, kind: Deployment}
-  environment: dev
-  git:
-    repo: https://github.com/argoproj/argocd-example-apps
-    ref: master
-  gitops:
-    repo: https://github.com/example/gitops
-    branch: main
-    path: envs/dev/guestbook-ui
+  service: api            # deployer 里登记的服务
+  builder: api-main       # 关联该服务的构建器
+  environment: dev3       # deployer 里的环境
+  ref: master             # 分支或 Tag,留空用构建器默认值

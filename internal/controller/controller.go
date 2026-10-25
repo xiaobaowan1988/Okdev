@@ -11,99 +11,79 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
-	listersbatch "k8s.io/client-go/listers/batch/v1"
-	listerscore "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 
 	v1 "github.com/xiaobaowan1988/okdev/internal/api/v1"
+	"github.com/xiaobaowan1988/okdev/internal/deployer"
 )
 
-// Controller 监听 ReleaseTask,为每个任务创建一个 Job,并把阶段和执行 Pod 名写回 status。
+// Deployer 是控制器用到的那部分 deployer 客户端,便于测试替换。
+type Deployer interface {
+	Healthy(ctx context.Context) error
+	GetBuilder(ctx context.Context, name string) (*deployer.Builder, error)
+	CreateRun(ctx context.Context, pipeline, builder, env, ref string, replicas *int, actor string) (*deployer.Run, error)
+	GetRun(ctx context.Context, id int64) (*deployer.Run, error)
+}
+
+type Config struct {
+	DefaultPipeline string        // spec.pipeline 留空时用的流水线
+	PollInterval    time.Duration // 轮询 deployer 运行状态的间隔
+	Actor           string        // 记在 deployer 历史里的操作人
+}
+
+// Controller 监听 ReleaseTask,向 deployer 提交一次流水线运行,并把运行状态同步回 status。
+// 构建、部署、并发控制、历史都在 deployer;这里不重复实现。
 type Controller struct {
 	cfg      Config
 	dyn      dynamic.Interface
-	kube     kubernetes.Interface
+	dep      Deployer
 	recorder record.EventRecorder
 	queue    workqueue.TypedRateLimitingInterface[string]
-
 	tasks    cache.SharedIndexInformer
-	jobs     listersbatch.JobLister
-	pods     listerscore.PodLister
-	hasSyncs []cache.InformerSynced
-	startFns []func(<-chan struct{})
+	start    func(<-chan struct{})
+	synced   cache.InformerSynced
 	now      func() metav1.Time
 }
 
 // New 创建控制器。namespace 为空表示监听所有命名空间。
-func New(cfg Config, dyn dynamic.Interface, kube kubernetes.Interface, rec record.EventRecorder, namespace string, resync time.Duration) *Controller {
+func New(cfg Config, dyn dynamic.Interface, dep Deployer, rec record.EventRecorder, namespace string, resync time.Duration) *Controller {
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = 3 * time.Second
+	}
+	if cfg.Actor == "" {
+		cfg.Actor = "okdev-controller"
+	}
 	c := &Controller{
-		cfg: cfg, dyn: dyn, kube: kube, recorder: rec,
+		cfg: cfg, dyn: dyn, dep: dep, recorder: rec,
 		queue: workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 		now:   metav1.Now,
 	}
-
-	taskFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dyn, resync, namespace, nil)
-	c.tasks = taskFactory.ForResource(v1.GVR).Informer()
+	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dyn, resync, namespace, nil)
+	c.tasks = factory.ForResource(v1.GVR).Informer()
 	c.tasks.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(o any) { c.enqueueKey(o) },
-		UpdateFunc: func(_, o any) { c.enqueueKey(o) },
+		AddFunc:    func(o any) { c.enqueue(o) },
+		UpdateFunc: func(_, o any) { c.enqueue(o) },
 	})
-
-	kubeFactory := informers.NewSharedInformerFactoryWithOptions(kube, resync,
-		informers.WithNamespace(namespace),
-		informers.WithTweakListOptions(func(o *metav1.ListOptions) { o.LabelSelector = LabelManagedBy + "=" + ManagedByValue }))
-	jobInf := kubeFactory.Batch().V1().Jobs()
-	podInf := kubeFactory.Core().V1().Pods()
-	c.jobs, c.pods = jobInf.Lister(), podInf.Lister()
-	child := cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(o any) { c.enqueueOwner(o) },
-		UpdateFunc: func(_, o any) { c.enqueueOwner(o) },
-		DeleteFunc: func(o any) { c.enqueueOwner(o) },
-	}
-	jobInformer, podInformer := jobInf.Informer(), podInf.Informer()
-	jobInformer.AddEventHandler(child)
-	podInformer.AddEventHandler(child)
-
-	c.hasSyncs = []cache.InformerSynced{c.tasks.HasSynced, jobInformer.HasSynced, podInformer.HasSynced}
-	c.startFns = []func(<-chan struct{}){taskFactory.Start, kubeFactory.Start}
+	c.start, c.synced = factory.Start, c.tasks.HasSynced
 	return c
 }
 
-func (c *Controller) enqueueKey(o any) {
+func (c *Controller) enqueue(o any) {
 	if key, err := cache.MetaNamespaceKeyFunc(o); err == nil {
 		c.queue.Add(key)
-	}
-}
-
-// enqueueOwner 通过注解找到 Job/Pod 所属的任务。
-func (c *Controller) enqueueOwner(o any) {
-	if tomb, ok := o.(cache.DeletedFinalStateUnknown); ok {
-		o = tomb.Obj
-	}
-	m, ok := o.(metav1.Object)
-	if !ok {
-		return
-	}
-	if name := m.GetAnnotations()[AnnotationTask]; name != "" {
-		c.queue.Add(m.GetNamespace() + "/" + name)
 	}
 }
 
 // Run 启动 informer 和 worker,阻塞到 ctx 结束。
 func (c *Controller) Run(ctx context.Context, workers int) error {
 	defer c.queue.ShutDown()
-	for _, s := range c.startFns {
-		s(ctx.Done())
-	}
-	if !cache.WaitForCacheSync(ctx.Done(), c.hasSyncs...) {
+	c.start(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), c.synced) {
 		return fmt.Errorf("cache sync failed")
 	}
 	slog.Info("controller started", "workers", workers)
@@ -132,12 +112,8 @@ func (c *Controller) processNext(ctx context.Context) bool {
 	return true
 }
 
-// Reconcile 让一个任务的 Job 和 status 与期望一致。
+// Reconcile 推进一个任务:没有提交过就提交,提交过就同步 deployer 的运行状态。
 func (c *Controller) Reconcile(ctx context.Context, key string) error {
-	ns, name, err := cache.SplitMetaNamespaceKey(key)
-	if err != nil {
-		return nil
-	}
 	obj, exists, err := c.tasks.GetIndexer().GetByKey(key)
 	if err != nil || !exists {
 		return err
@@ -153,111 +129,184 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 	if task.Status.Phase.Terminal() {
 		return nil
 	}
-
 	if msg := task.Spec.Validate(); msg != "" {
 		c.recorder.Event(raw, corev1.EventTypeWarning, "InvalidSpec", msg)
-		return c.writeStatus(ctx, raw, task.Status, v1.ReleaseTaskStatus{
-			Phase: v1.PhaseFailed, Message: msg, CompletionTime: ptr(c.now()),
-		})
+		return c.fail(ctx, raw, msg)
+	}
+	if task.Status.RunID == 0 {
+		return c.submit(ctx, key, raw, task)
+	}
+	return c.poll(ctx, key, raw, task)
+}
+
+func (c *Controller) submit(ctx context.Context, key string, raw *unstructured.Unstructured, task *v1.ReleaseTask) error {
+	if task.Status.Stage == v1.StageSubmitting {
+		// 缓存可能落后:我们自己刚写的"提交中"标记已经被后面的 runID 覆盖,但缓存里还是旧的。先读最新的再判断。
+		live, err := c.dyn.Resource(v1.GVR).Namespace(raw.GetNamespace()).Get(ctx, raw.GetName(), metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if lt, err := v1.FromUnstructured(live); err != nil {
+			return err
+		} else if lt.Status.RunID != 0 || lt.Status.Phase.Terminal() {
+			c.queue.AddAfter(key, c.cfg.PollInterval)
+			return nil
+		}
+		// 已经写过"提交中"标记却没有 runID:控制器在提交过程中重启过,deployer 那边有没有创建运行不确定。
+		// 重新提交可能造成重复部署,所以不重试,让人确认。
+		msg := fmt.Sprintf("submission state unknown (controller restarted while submitting); check recent runs of builder %q in env %q in deployer, then create a new task if none exists", task.Spec.Builder, task.Spec.Environment)
+		c.recorder.Event(raw, corev1.EventTypeWarning, "SubmissionUnknown", msg)
+		return c.fail(ctx, raw, msg)
+	}
+	// deployer 不可达时先别写标记,等它恢复(返回错误走退避重试)。
+	if err := c.dep.Healthy(ctx); err != nil {
+		return fmt.Errorf("deployer not reachable: %w", err)
+	}
+	b, err := c.dep.GetBuilder(ctx, task.Spec.Builder)
+	switch {
+	case deployer.IsNotFound(err):
+		return c.fail(ctx, raw, fmt.Sprintf("builder %q does not exist in deployer", task.Spec.Builder))
+	case err != nil && deployer.ClientError(err):
+		return c.fail(ctx, raw, "deployer rejected the builder lookup: "+err.Error())
+	case err != nil:
+		return err
+	case b.Service != task.Spec.Service:
+		return c.fail(ctx, raw, fmt.Sprintf("builder %q belongs to service %q, not %q", b.Name, b.Service, task.Spec.Service))
 	}
 
-	job, err := c.jobs.Jobs(ns).Get(JobName(name))
+	// 先写"提交中"标记,再提交。写之前读一次最新的任务,避免缓存落后时重复提交。
+	marked, err := c.updateStatus(ctx, raw.GetNamespace(), raw.GetName(), func(cur *v1.ReleaseTaskStatus) bool {
+		if cur.RunID != 0 || cur.Stage != "" || cur.Phase.Terminal() {
+			return false // 别处已经处理过
+		}
+		cur.Phase, cur.Stage = v1.PhasePending, v1.StageSubmitting
+		return true
+	})
+	if err != nil || !marked {
+		return err
+	}
+
+	pipeline := task.Spec.Pipeline
+	if pipeline == "" {
+		pipeline = c.cfg.DefaultPipeline
+	}
+	run, err := c.dep.CreateRun(ctx, pipeline, task.Spec.Builder, task.Spec.Environment, task.Spec.Ref, task.Spec.Replicas, c.cfg.Actor)
+	if err != nil {
+		var msg string
+		if deployer.ClientError(err) {
+			msg = "deployer rejected the run: " + err.Error()
+		} else {
+			// 网络错误等:请求可能已经到达。同样不自动重试,避免重复部署。
+			msg = fmt.Sprintf("submission failed with unknown result (%v); check recent runs of builder %q in env %q in deployer before retrying", err, task.Spec.Builder, task.Spec.Environment)
+		}
+		c.recorder.Event(raw, corev1.EventTypeWarning, "SubmitFailed", msg)
+		return c.fail(ctx, raw, msg)
+	}
+	c.recorder.Eventf(raw, corev1.EventTypeNormal, "Submitted", "submitted deployer run %d (pipeline %s, builder %s, env %s)", run.ID, pipeline, task.Spec.Builder, task.Spec.Environment)
+	if _, err := c.updateStatus(ctx, raw.GetNamespace(), raw.GetName(), func(cur *v1.ReleaseTaskStatus) bool {
+		*cur = StatusFromRun(*cur, run, c.now())
+		return true
+	}); err != nil {
+		return err
+	}
+	c.queue.AddAfter(key, c.cfg.PollInterval)
+	return nil
+}
+
+func (c *Controller) poll(ctx context.Context, key string, raw *unstructured.Unstructured, task *v1.ReleaseTask) error {
+	run, err := c.dep.GetRun(ctx, task.Status.RunID)
 	switch {
-	case apierrors.IsNotFound(err):
-		job = nil
+	case deployer.IsNotFound(err):
+		return c.fail(ctx, raw, fmt.Sprintf("run %d no longer exists in deployer", task.Status.RunID))
 	case err != nil:
 		return err
 	}
-
-	if job == nil && task.Status.JobName == "" {
-		// 缓存里的任务可能落后于我们自己刚写的 status:建 Job 之前读一次最新的,避免 Job 被删后重复创建。
-		live, err := c.dyn.Resource(v1.GVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil
-			}
-			return err
+	var changedPhase bool
+	var after v1.ReleaseTaskStatus
+	if _, err := c.updateStatus(ctx, raw.GetNamespace(), raw.GetName(), func(cur *v1.ReleaseTaskStatus) bool {
+		next := StatusFromRun(*cur, run, c.now())
+		if equality.Semantic.DeepEqual(*cur, next) {
+			return false
 		}
-		if raw, task, err = decodeLive(live); err != nil {
-			return err
-		}
-	}
-
-	if job == nil && task.Status.JobName != "" {
-		// 缓存可能还没看到刚建的 Job:向 API server 确认后才算丢失。
-		live, err := c.kube.BatchV1().Jobs(ns).Get(ctx, task.Status.JobName, metav1.GetOptions{})
-		switch {
-		case err == nil:
-			job = live
-		case !apierrors.IsNotFound(err):
-			return err
-		}
-	}
-
-	if job == nil && task.Status.JobName != "" {
-		// 已经创建过 Job 但现在找不到(被人删了),不重建以免重复发布。
-		c.recorder.Event(raw, corev1.EventTypeWarning, "JobLost", "executor job disappeared")
-		st := task.Status
-		st.Phase, st.Message, st.CompletionTime = v1.PhaseFailed, "executor job was deleted", ptr(c.now())
-		return c.writeStatus(ctx, raw, task.Status, st)
-	}
-
-	if job == nil {
-		created, err := c.kube.BatchV1().Jobs(ns).Create(ctx, BuildJob(task, c.cfg), metav1.CreateOptions{})
-		if apierrors.IsAlreadyExists(err) {
-			return nil // informer 还没看到,等 Job 事件触发下一轮
-		}
-		if err != nil {
-			return fmt.Errorf("create job: %w", err)
-		}
-		c.recorder.Eventf(raw, corev1.EventTypeNormal, "JobCreated", "created executor job %s", created.Name)
-		job = created
-	}
-
-	pods, err := c.pods.Pods(ns).List(labels.SelectorFromSet(labels.Set{"job-name": job.Name}))
-	if err != nil {
+		changedPhase = next.Phase != cur.Phase
+		*cur, after = next, next
+		return true
+	}); err != nil {
 		return err
 	}
-	next := ComputeStatus(task.Status, job, pods, c.now())
-	if next.Phase != task.Status.Phase {
-		c.emitPhaseEvent(raw, next)
+	if changedPhase {
+		c.emitPhaseEvent(raw, after)
 	}
-	return c.writeStatus(ctx, raw, task.Status, next)
+	if !PhaseOf(run.Status).Terminal() {
+		c.queue.AddAfter(key, c.cfg.PollInterval)
+	}
+	return nil
 }
 
 func (c *Controller) emitPhaseEvent(raw *unstructured.Unstructured, st v1.ReleaseTaskStatus) {
 	switch st.Phase {
 	case v1.PhaseRunning:
-		c.recorder.Eventf(raw, corev1.EventTypeNormal, "Running", "executor pod %s is running", st.ExecutorPodName)
+		c.recorder.Eventf(raw, corev1.EventTypeNormal, "Running", "run %d is %s", st.RunID, st.Stage)
 	case v1.PhaseSuccess:
-		c.recorder.Event(raw, corev1.EventTypeNormal, "Succeeded", "release task succeeded")
+		c.recorder.Eventf(raw, corev1.EventTypeNormal, "Succeeded", "run %d succeeded, image %s", st.RunID, st.Image)
 	case v1.PhaseFailed:
-		c.recorder.Eventf(raw, corev1.EventTypeWarning, "Failed", "release task failed: %s", st.Message)
+		c.recorder.Eventf(raw, corev1.EventTypeWarning, "Failed", "run %d %s: %s", st.RunID, st.Stage, st.Message)
 	}
 }
 
-func (c *Controller) writeStatus(ctx context.Context, raw *unstructured.Unstructured, cur, next v1.ReleaseTaskStatus) error {
-	if equality.Semantic.DeepEqual(cur, next) {
-		return nil
-	}
-	m, err := v1.StatusToMap(next)
-	if err != nil {
-		return err
-	}
-	out := raw.DeepCopy()
-	if err := unstructured.SetNestedMap(out.Object, runtime.DeepCopyJSON(m), "status"); err != nil {
-		return err
-	}
-	_, err = c.dyn.Resource(v1.GVR).Namespace(raw.GetNamespace()).UpdateStatus(ctx, out, metav1.UpdateOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
+// fail 把任务置为失败(终态)。
+func (c *Controller) fail(ctx context.Context, raw *unstructured.Unstructured, msg string) error {
+	_, err := c.updateStatus(ctx, raw.GetNamespace(), raw.GetName(), func(cur *v1.ReleaseTaskStatus) bool {
+		if cur.Phase.Terminal() {
+			return false
+		}
+		cur.Phase, cur.Message, cur.CompletionTime = v1.PhaseFailed, msg, ptr(c.now())
+		return true
+	})
 	return err
 }
 
-func decodeLive(u *unstructured.Unstructured) (*unstructured.Unstructured, *v1.ReleaseTask, error) {
-	t, err := v1.FromUnstructured(u)
-	return u, t, err
+// updateStatus 读最新的任务、应用 mutate、写回 status;冲突时重试。mutate 返回 false 表示无需写入。
+// 返回值表示是否真的写入了。
+func (c *Controller) updateStatus(ctx context.Context, ns, name string, mutate func(*v1.ReleaseTaskStatus) bool) (bool, error) {
+	res := c.dyn.Resource(v1.GVR).Namespace(ns)
+	for attempt := 0; attempt < 5; attempt++ {
+		live, err := res.Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		task, err := v1.FromUnstructured(live)
+		if err != nil {
+			return false, err
+		}
+		st := task.Status
+		if !mutate(&st) {
+			return false, nil
+		}
+		m, err := v1.StatusToMap(st)
+		if err != nil {
+			return false, err
+		}
+		out := live.DeepCopy()
+		if err := unstructured.SetNestedMap(out.Object, runtime.DeepCopyJSON(m), "status"); err != nil {
+			return false, err
+		}
+		_, err = res.UpdateStatus(ctx, out, metav1.UpdateOptions{})
+		if apierrors.IsConflict(err) {
+			continue
+		}
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return err == nil, err
+	}
+	return false, fmt.Errorf("update status of %s/%s: too many conflicts", ns, name)
 }
 
 func ptr[T any](v T) *T { return &v }

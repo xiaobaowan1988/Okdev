@@ -16,11 +16,9 @@ spec:
         - name: controller
           image: okdev-controller:latest
           args:
-            - --executor-image=$(EXECUTOR_IMAGE)
+            - --namespace=okdev-releases
+            - --deployer-url=http://deployer.deployer.svc:8080
             - --leader-elect
-          env:
-            - name: EXECUTOR_IMAGE
-              value: okdev-executor:latest   # 替换为真实的构建/部署执行器镜像
           ports: [{name: http, containerPort: 8080}]
           resources:
             requests: {cpu: 50m, memory: 64Mi}

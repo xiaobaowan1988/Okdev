@@ -33,7 +33,12 @@ const (
 
 func (p Phase) Terminal() bool { return p == PhaseSuccess || p == PhaseFailed }
 
-// ReleaseTask 描述一次"把某服务的某个 Git 版本发布到某环境"。
+// StageSubmitting 是控制器向 deployer 提交运行期间写入 status.stage 的标记:
+// 提交后、记下 runID 前如果控制器崩溃,重启后看到这个标记就知道"提交结果不明",不会重复提交造成重复部署。
+const StageSubmitting = "submitting"
+
+// ReleaseTask 描述一次"把某服务的某个分支/Tag 构建并发布到某环境"。
+// 构建和部署由 deployer(myk8s)执行,这里只是它的 K8s 原生入口:RBAC、kubectl 可查、Headlamp 统一界面。
 type ReleaseTask struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -42,72 +47,46 @@ type ReleaseTask struct {
 }
 
 type ReleaseTaskSpec struct {
-	// Service 是被发布的工作负载。
-	Service ServiceRef `json:"service"`
-	// Environment 是目标环境,即目标 Namespace。
+	// Service 是 deployer 里登记的服务名。
+	Service string `json:"service"`
+	// Builder 是 deployer 里关联该服务的构建器。
+	Builder string `json:"builder"`
+	// Environment 是 deployer 里的环境名(不是 K8s 命名空间)。
 	Environment string `json:"environment"`
-	// Git 是要构建的源码版本。
-	Git GitSpec `json:"git"`
-	// GitOps 是部署配置所在仓库;留空则执行器只构建不改配置。
-	GitOps *GitOpsSpec `json:"gitops,omitempty"`
-	// Executor 覆盖控制器的默认执行器镜像。
-	Executor *ExecutorSpec `json:"executor,omitempty"`
-	// TimeoutSeconds 是整个任务的超时,0 表示用控制器默认值。
-	TimeoutSeconds int64 `json:"timeoutSeconds,omitempty"`
-}
-
-type ServiceRef struct {
-	Name string `json:"name"`
-	// Kind 是 Deployment / StatefulSet / CronJob / Job 之一。
-	Kind string `json:"kind"`
-}
-
-type GitSpec struct {
-	Repo string `json:"repo"`
-	// Ref 可以是分支、Tag 或 commit SHA。
-	Ref string `json:"ref"`
-}
-
-type GitOpsSpec struct {
-	Repo   string `json:"repo"`
-	Branch string `json:"branch,omitempty"`
-	// Path 是仓库内该服务在该环境的配置目录。
-	Path string `json:"path,omitempty"`
-}
-
-type ExecutorSpec struct {
-	Image   string   `json:"image,omitempty"`
-	Command []string `json:"command,omitempty"`
+	// Ref 是要构建的分支或 Tag;留空用构建器的默认值。
+	Ref string `json:"ref,omitempty"`
+	// Pipeline 是要运行的流水线;留空用控制器的默认值。
+	Pipeline string `json:"pipeline,omitempty"`
+	// Replicas 仅在该环境还没有这个服务的部署时使用。
+	Replicas *int `json:"replicas,omitempty"`
 }
 
 type ReleaseTaskStatus struct {
 	Phase Phase `json:"phase,omitempty"`
-	// JobName 是控制器为该任务创建的 Job。
-	JobName string `json:"jobName,omitempty"`
-	// ExecutorPodName 是正在(或曾经)执行任务的 Pod,前端据此读取日志。
-	ExecutorPodName string       `json:"executorPodName,omitempty"`
-	Message         string       `json:"message,omitempty"`
-	StartTime       *metav1.Time `json:"startTime,omitempty"`
-	CompletionTime  *metav1.Time `json:"completionTime,omitempty"`
+	// Stage 是 deployer 运行的原始状态:pending / building / deploying / succeeded / failed / cancelled。
+	Stage string `json:"stage,omitempty"`
+	// RunID 是 deployer 里的运行编号,日志、取消、审计都以它为准。
+	RunID int64 `json:"runID,omitempty"`
+	// Image 是本次构建出的镜像。
+	Image          string       `json:"image,omitempty"`
+	Message        string       `json:"message,omitempty"`
+	StartTime      *metav1.Time `json:"startTime,omitempty"`
+	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 }
-
-var validKinds = map[string]bool{"Deployment": true, "StatefulSet": true, "CronJob": true, "Job": true}
 
 // Validate 检查 spec 是否完整。
 func (s ReleaseTaskSpec) Validate() string {
 	switch {
-	case s.Service.Name == "":
-		return "spec.service.name is required"
-	case !validKinds[s.Service.Kind]:
-		return "spec.service.kind must be one of Deployment, StatefulSet, CronJob, Job"
+	case s.Service == "":
+		return "spec.service is required"
+	case s.Builder == "":
+		return "spec.builder is required"
 	case s.Environment == "":
 		return "spec.environment is required"
-	case s.Git.Repo == "":
-		return "spec.git.repo is required"
-	case s.Git.Ref == "":
-		return "spec.git.ref is required"
-	case strings.HasPrefix(s.Git.Ref, "-") || strings.HasPrefix(s.Git.Repo, "-"):
-		return "spec.git.repo and spec.git.ref must not start with '-'"
+	case strings.HasPrefix(s.Ref, "-"):
+		return "spec.ref must not start with '-'"
+	case s.Replicas != nil && (*s.Replicas < 0 || *s.Replicas > 50):
+		return "spec.replicas must be 0..50"
 	}
 	return ""
 }

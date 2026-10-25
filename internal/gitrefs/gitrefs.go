@@ -1,11 +1,9 @@
 // Package gitrefs 列出远程 Git 仓库的分支和 Tag(等价于 git ls-remote),
-// 通过一个只读 HTTP 接口提供给前端的下拉选择。
+// 给前端的分支/Tag 下拉选择用。仓库地址只来自 deployer 里登记的构建器,调用方不能指定任意 URL。
 package gitrefs
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -27,8 +25,6 @@ type Refs struct {
 
 // Lister 带缓存地列出远程引用。
 type Lister struct {
-	// AllowPrefixes 是允许查询的仓库地址前缀;为空表示一律拒绝,避免控制器被当成任意 URL 的探测器。
-	AllowPrefixes []string
 	// Token 非空时,以 HTTP Basic(x-access-token)访问 http(s) 仓库。
 	Token string
 	TTL   time.Duration
@@ -44,18 +40,8 @@ type entry struct {
 	at   time.Time
 }
 
-func NewLister(allow []string, token string) *Lister {
-	return &Lister{AllowPrefixes: allow, Token: token, TTL: 30 * time.Second, list: lsRemote, now: time.Now, cache: map[string]entry{}}
-}
-
-// Allowed 报告仓库地址是否在白名单内。
-func (l *Lister) Allowed(repo string) bool {
-	for _, p := range l.AllowPrefixes {
-		if p != "" && strings.HasPrefix(repo, p) {
-			return true
-		}
-	}
-	return false
+func NewLister(token string) *Lister {
+	return &Lister{Token: token, TTL: 30 * time.Second, list: lsRemote, now: time.Now, cache: map[string]entry{}}
 }
 
 // List 返回仓库的引用,同一仓库在 TTL 内走缓存。
@@ -110,34 +96,4 @@ func lsRemote(ctx context.Context, repo, token string) ([]*plumbing.Reference, s
 		}
 	}
 	return refs, head, nil
-}
-
-// Handler 提供 GET /refs?repo=<url>。认证和授权由前面的 API Server 服务代理负责。
-func (l *Lister) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/refs", func(w http.ResponseWriter, r *http.Request) {
-		repo := r.URL.Query().Get("repo")
-		switch {
-		case repo == "":
-			writeErr(w, http.StatusBadRequest, "repo is required")
-		case !l.Allowed(repo):
-			writeErr(w, http.StatusForbidden, "repository is not in the allowed list")
-		default:
-			refs, err := l.List(r.Context(), repo)
-			if err != nil {
-				writeErr(w, http.StatusBadGateway, "list refs: "+err.Error())
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(refs)
-		}
-	})
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
-	return mux
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

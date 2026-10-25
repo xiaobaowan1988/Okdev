@@ -18,11 +18,12 @@ spec:
       subresources:
         status: {}
       additionalPrinterColumns:
-        - {name: Service, type: string, jsonPath: .spec.service.name}
+        - {name: Service, type: string, jsonPath: .spec.service}
         - {name: Env, type: string, jsonPath: .spec.environment}
-        - {name: Ref, type: string, jsonPath: .spec.git.ref}
+        - {name: Ref, type: string, jsonPath: .spec.ref}
         - {name: Phase, type: string, jsonPath: .status.phase}
-        - {name: Pod, type: string, jsonPath: .status.executorPodName}
+        - {name: Stage, type: string, jsonPath: .status.stage}
+        - {name: Run, type: integer, jsonPath: .status.runID}
         - {name: Age, type: date, jsonPath: .metadata.creationTimestamp}
       schema:
         openAPIV3Schema:
@@ -31,34 +32,14 @@ spec:
           properties:
             spec:
               type: object
-              required: [service, environment, git]
+              required: [service, builder, environment]
               properties:
-                service:
-                  type: object
-                  required: [name, kind]
-                  properties:
-                    name: {type: string, minLength: 1}
-                    kind: {type: string, enum: [Deployment, StatefulSet, CronJob, Job]}
-                environment: {type: string, minLength: 1}
-                git:
-                  type: object
-                  required: [repo, ref]
-                  properties:
-                    repo: {type: string, minLength: 1}
-                    ref: {type: string, minLength: 1}
-                gitops:
-                  type: object
-                  required: [repo]
-                  properties:
-                    repo: {type: string}
-                    branch: {type: string}
-                    path: {type: string}
-                executor:
-                  type: object
-                  properties:
-                    image: {type: string}
-                    command: {type: array, items: {type: string}}
-                timeoutSeconds: {type: integer, minimum: 0}
+                service: {type: string, minLength: 1, description: "deployer 里登记的服务名"}
+                builder: {type: string, minLength: 1, description: "deployer 里关联该服务的构建器"}
+                environment: {type: string, minLength: 1, description: "deployer 里的环境名(不是命名空间)"}
+                ref: {type: string, description: "分支或 Tag;留空用构建器的默认值"}
+                pipeline: {type: string, description: "流水线;留空用控制器的默认值"}
+                replicas: {type: integer, minimum: 0, maximum: 50, description: "仅在该环境还没有这个服务的部署时使用"}
               x-kubernetes-validations:
                 - rule: "self == oldSelf"
                   message: spec is immutable; create a new ReleaseTask instead
@@ -66,8 +47,9 @@ spec:
               type: object
               properties:
                 phase: {type: string, enum: [Pending, Running, Success, Failed]}
-                jobName: {type: string}
-                executorPodName: {type: string}
+                stage: {type: string}
+                runID: {type: integer, format: int64}
+                image: {type: string}
                 message: {type: string}
                 startTime: {type: string, format: date-time}
                 completionTime: {type: string, format: date-time}

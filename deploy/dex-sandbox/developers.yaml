@@ -1,5 +1,5 @@
 # 沙箱示例:只授权 alice;bob 能登录但没有任何权限(用来验证"登录 ≠ 授权")。
-# 用户名 = API Server 的 --oidc-username-prefix("dex:") + Zadig 账号名(preferred_username),用用户名或邮箱登录都是同一个人。
+# 用户名 = API Server 的 --oidc-username-prefix("dex:") + 账号名(name 声明),用用户名或邮箱登录都是同一个人。
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: {name: okdev-developers}
@@ -10,4 +10,16 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: {name: okdev-developers-view}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: "dex:alice"}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: okdev-release-submitters, namespace: okdev-releases}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: okdev-release-submitter}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: "dex:alice"}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: okdev-console-readers, namespace: okdev-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: okdev-console-reader}
 subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: "dex:alice"}]

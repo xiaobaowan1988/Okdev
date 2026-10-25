@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -25,6 +24,8 @@ import (
 	"k8s.io/client-go/tools/record"
 
 	"github.com/xiaobaowan1988/okdev/internal/controller"
+	"github.com/xiaobaowan1988/okdev/internal/deployer"
+	"github.com/xiaobaowan1988/okdev/internal/gateway"
 	"github.com/xiaobaowan1988/okdev/internal/gitrefs"
 )
 
@@ -38,37 +39,19 @@ func main() {
 		cfg         controller.Config
 
 		httpAddr      string
-		allowPrefixes []string
+		deployerURL   string
+		deployerToken string
 		gitTokenFile  string
 	)
-	flag.StringVar(&cfg.ExecutorImage, "executor-image", "", "默认执行器镜像(必填)")
-	flag.StringVar(&httpAddr, "http-addr", ":8080", "只读 HTTP 接口地址(GET /refs 列出仓库分支和 Tag,供 Headlamp 下拉选择),留空关闭")
-	flag.Func("git-allow-prefix", "允许查询分支的仓库地址前缀,必须以 / 结尾,可重复;不设置则 /refs 拒绝所有仓库", func(v string) error {
-		if !strings.HasSuffix(v, "/") {
-			return fmt.Errorf("prefix %q must end with '/'", v)
-		}
-		allowPrefixes = append(allowPrefixes, v)
-		return nil
-	})
-	flag.StringVar(&gitTokenFile, "git-token-file", "", "访问私有 http(s) 仓库的 token 文件(可选)")
-	flag.StringVar(&cfg.KanikoImage, "kaniko-image", "gcr.io/kaniko-project/executor:v1.23.2-debug", "构建镜像用的 kaniko(需带 shell 的 debug 版)")
-	flag.StringVar(&cfg.CAConfigMap, "ca-configmap", "", "含 build-ca.crt 的 ConfigMap(可选)")
-	flag.StringVar(&cfg.GitOpsSecret, "gitops-secret", "", "含 token 的 Secret,用于推送 GitOps 仓库(可选)")
-	flag.Func("executor-env", "传给执行器的环境变量 KEY=VALUE,可重复,如 REGISTRY_PUSH=...", func(v string) error {
-		k, val, ok := strings.Cut(v, "=")
-		if !ok || k == "" {
-			return fmt.Errorf("want KEY=VALUE, got %q", v)
-		}
-		cfg.ExtraEnv = append(cfg.ExtraEnv, corev1.EnvVar{Name: k, Value: val})
-		return nil
-	})
-	flag.DurationVar(&cfg.DefaultTimeout, "default-timeout", 30*time.Minute, "任务默认超时")
+	flag.StringVar(&deployerURL, "deployer-url", "http://deployer.deployer.svc:8080", "deployer(myk8s)的地址")
+	flag.StringVar(&deployerToken, "deployer-token-file", "", "deployer 的 API_TOKEN 文件(deployer 开启鉴权时需要)")
+	flag.StringVar(&cfg.DefaultPipeline, "default-pipeline", "build-and-deploy", "spec.pipeline 留空时运行的流水线")
+	flag.DurationVar(&cfg.PollInterval, "poll-interval", 3*time.Second, "轮询 deployer 运行状态的间隔")
+	flag.StringVar(&cfg.Actor, "actor", "okdev-controller", "记在 deployer 历史里的操作人")
+	flag.StringVar(&httpAddr, "http-addr", ":8080", "只读 HTTP 接口地址(给 Headlamp 插件:构建器、环境、分支/Tag、运行日志),留空关闭")
+	flag.StringVar(&gitTokenFile, "git-token-file", "", "访问私有 http(s) 仓库列分支用的 token 文件(可选)")
 	flag.Parse()
 
-	if cfg.ExecutorImage == "" {
-		slog.Error("--executor-image is required")
-		os.Exit(2)
-	}
 	rc, err := restConfig(*kubeconfig)
 	if err != nil {
 		slog.Error("load kube config", "err", err)
@@ -76,6 +59,9 @@ func main() {
 	}
 	kube := kubernetes.NewForConfigOrDie(rc)
 	dyn := dynamic.NewForConfigOrDie(rc)
+
+	token := readTrim(deployerToken)
+	dep := deployer.New(deployerURL, token)
 
 	broadcaster := record.NewBroadcaster()
 	broadcaster.StartRecordingToSink(&typedcore.EventSinkImpl{Interface: kube.CoreV1().Events("")})
@@ -86,16 +72,8 @@ func main() {
 	defer stop()
 
 	if httpAddr != "" {
-		token := ""
-		if gitTokenFile != "" {
-			b, err := os.ReadFile(gitTokenFile)
-			if err != nil {
-				slog.Error("read git token", "err", err)
-				os.Exit(1)
-			}
-			token = strings.TrimSpace(string(b))
-		}
-		srv := &http.Server{Addr: httpAddr, Handler: gitrefs.NewLister(allowPrefixes, token).Handler(), ReadHeaderTimeout: 5 * time.Second}
+		gw := &gateway.Gateway{Dep: dep, Refs: gitrefs.NewLister(readTrim(gitTokenFile))}
+		srv := &http.Server{Addr: httpAddr, Handler: gw.Handler(), ReadHeaderTimeout: 5 * time.Second}
 		go func() {
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Error("http server", "err", err)
@@ -106,7 +84,7 @@ func main() {
 	}
 
 	run := func(ctx context.Context) {
-		c := controller.New(cfg, dyn, kube, rec, *namespace, 10*time.Minute)
+		c := controller.New(cfg, dyn, dep, rec, *namespace, 10*time.Minute)
 		if err := c.Run(ctx, *workers); err != nil {
 			slog.Error("controller stopped", "err", err)
 			os.Exit(1)
@@ -138,4 +116,17 @@ func restConfig(path string) (*rest.Config, error) {
 		return clientcmd.BuildConfigFromFlags("", path)
 	}
 	return rest.InClusterConfig()
+}
+
+// readTrim 读文件内容并去掉首尾空白;路径为空或读取失败时退出(配置了就必须可读)。
+func readTrim(path string) string {
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		slog.Error("read file", "path", path, "err", err)
+		os.Exit(1)
+	}
+	return strings.TrimSpace(string(b))
 }
