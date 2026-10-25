@@ -71,3 +71,18 @@ kubectl create ns dev   # 并把 build-ca ConfigMap 复制进 dev(沙箱出口 H
   - 不存在的 ref:`Failed`,`message` 为 `container checkout exited with code 128: fatal: invalid reference: nope`。
 - 实测前发现并修复了两个缓存滞后导致的竞态:informer 缓存里任务/Job 落后于刚写的 status/刚建的 Job 时,会把刚建的 Job 误判为丢失、或在 Job 被删后重复创建。现在判定"丢失"和"创建"前都向 API server 确认。
 - 未验证:GitOps 走 HTTPS + token 推送(沙箱只测了 git:// 协议)、Kubernetes 在多副本选主切换下的行为、`spec.timeoutSeconds` 超时路径。
+
+## Headlamp 插件(`headlamp-plugin/okdev-console`)
+- **`/services`(排障流)**:顶部环境(Namespace)下拉;四个 hook 并发订阅 Deployment / StatefulSet / CronJob / Job,合并成一张表,带"资源类型"列。服务名整页跳转到 Headlamp 原生详情页(`/c/<cluster>/{deployments|statefulsets|cronjobs|jobs}/<ns>/<name>`),Pod 列表、日志、终端都用原生功能。有 ownerReference 的 Job(CronJob 子任务、本项目的执行 Job)不列出。
+- **`/workflows`(发布流)**:选环境、服务、Git 仓库与分支/Tag/Commit,可选 GitOps 设置,点"运行"经 Headlamp API 代理创建 `ReleaseTask`,然后跳转详情页。表单默认值可由工作负载注解预填:`okdev.io/git-repo`、`okdev.io/git-ref`、`okdev.io/gitops-repo`、`okdev.io/gitops-branch`、`okdev.io/gitops-path`。下方是该环境最近的任务列表。
+- **`/workflows/:namespace/:name`(任务详情)**:状态条(Pending → Running → Success/Failed)、失败原因、基本信息、按时间排序的 K8s Events 时间线、按步骤(checkout / prepare / build / release)分页的实时日志(`executorPodName` 出现后才加载,未开始的步骤显示"尚未开始";任务结束后停止 follow)。
+  与设计文档的差异:路径多了 namespace,因为 `ReleaseTask` 是命名空间级资源。
+- 开发:`cd headlamp-plugin/okdev-console && npm install && npm run build|tsc|lint`。
+- 部署到集群:`scripts/deploy-headlamp.sh`(构建 → ConfigMap → 集群内 Headlamp),`kubectl -n okdev-system port-forward svc/headlamp 4466:80`,用 ServiceAccount token 登录。
+- 端到端脚本 `headlamp-plugin/e2e/`(Playwright,`TOKEN_FILE` 指向 token 文件):`node services.js`、`node workflows.js`。
+
+插件在 myk8s 集群上用浏览器实测通过(Headlamp v0.4x 镜像 `ghcr.io/headlamp-k8s/headlamp:latest`,k8s v1.37.1):
+- 服务页:切到 dev,列出 Deployment / StatefulSet / CronJob / Job 四类共 4 行,三类服务点击后分别落在对应原生路由。
+- 工作流页:选 hello 后仓库、ref、GitOps 目录由注解预填;运行后自动跳转详情页,状态条依次经过 Pending → Running → Success;Events 显示 JobCreated / Running / Succeeded;构建中能看到 kaniko 实时日志,结束后 release 日志显示 `pushed … to main`,GitOps 仓库确实多了对应 commit。
+- 失败路径:ref 填 `nope`,详情页显示 Failed 和 `container checkout exited with code 128: fatal: invalid reference: nope`。
+- 未验证:非 cluster-admin 用户(只绑 `okdev-releasetask-editor`)的权限表现、多集群、Headlamp 桌面版、窄屏布局。
