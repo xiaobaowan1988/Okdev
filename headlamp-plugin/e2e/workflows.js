@@ -2,8 +2,8 @@ const {open}=require('./lib');
 async function run(p, ref){
   await p.goto('http://localhost:4466/c/main/workflows'); await p.waitForTimeout(2000);
   await p.getByTestId('env-select').click(); await p.getByRole('option',{name:'dev',exact:true}).click(); await p.waitForTimeout(1500);
-  await p.getByTestId('service-input').click(); await p.getByRole('option',{name:/hello/}).click();
-  await p.getByTestId('git-ref').fill(ref);
+  await p.getByTestId('service-input').click(); await p.getByRole('option',{name:/^hello/}).click(); await p.keyboard.press('Escape');
+  await p.getByTestId('ref-hello').fill(ref);
   await p.getByTestId('run-button').click();
   await p.waitForURL(/\/workflows\/dev\/hello-/, {timeout:20000});
 }
