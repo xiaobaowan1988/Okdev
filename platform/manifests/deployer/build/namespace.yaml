@@ -1,0 +1,5 @@
+# 构建任务(kaniko Job)和镜像仓库所在的命名空间
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deployer-build

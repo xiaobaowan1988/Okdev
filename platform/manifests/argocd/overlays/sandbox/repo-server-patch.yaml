@@ -1,0 +1,24 @@
+# 沙箱出口网关会对 HTTPS 做中间人,repo-server 需要信任其 CA:
+# 把 CA bundle 覆盖挂载为系统信任库(不要往 argocd-tls-certs-cm 放 github.com 条目,
+# 否则 Argo CD 对该主机只认那里的证书)。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-repo-server
+spec:
+  template:
+    spec:
+      volumes:
+        - name: sandbox-ca
+          configMap:
+            name: sandbox-ca
+      containers:
+        - name: argocd-repo-server
+          env:
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/certs/ca-certificates.crt
+          volumeMounts:
+            - name: sandbox-ca
+              mountPath: /etc/ssl/certs/ca-certificates.crt
+              subPath: ca-bundle.crt
+              readOnly: true

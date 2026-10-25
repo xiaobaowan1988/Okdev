@@ -1,0 +1,49 @@
+# 原型用的单实例 MySQL(无高可用)。数据放节点 hostPath,Pod 重建不丢;生产请换成托管/主从。
+# 密码在 Secret deployer-mysql(root-password / password),由 scripts/deploy-mysql.sh 随机生成,不入库。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: mysql}
+  template:
+    metadata:
+      labels: {app: mysql}
+    spec:
+      containers:
+        - name: mysql
+          # Docker Hub / ECR 在共享出口 IP 下容易 429,用 Google 的 Docker Hub 镜像
+          image: mirror.gcr.io/library/mysql:8.4
+          args: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+          env:
+            - {name: MYSQL_DATABASE, value: deployer}
+            - {name: MYSQL_USER, value: deployer}
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom: {secretKeyRef: {name: deployer-mysql, key: root-password}}
+            - name: MYSQL_PASSWORD
+              valueFrom: {secretKeyRef: {name: deployer-mysql, key: password}}
+          ports:
+            - containerPort: 3306
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -uroot -p\"$MYSQL_ROOT_PASSWORD\" --silent"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/mysql}
+      volumes:
+        - name: data
+          hostPath: {path: /var/lib/deployer-mysql, type: DirectoryOrCreate}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+spec:
+  selector: {app: mysql}
+  ports:
+    - port: 3306
