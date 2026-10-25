@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"k8s.io/client-go/tools/record"
 
 	"github.com/xiaobaowan1988/okdev/internal/controller"
+	"github.com/xiaobaowan1988/okdev/internal/gitrefs"
 )
 
 func main() {
@@ -34,8 +36,21 @@ func main() {
 		leaderElect = flag.Bool("leader-elect", false, "多副本时开启 Lease 选主")
 		leaseNS     = flag.String("leader-election-namespace", "okdev-system", "选主 Lease 所在命名空间")
 		cfg         controller.Config
+
+		httpAddr      string
+		allowPrefixes []string
+		gitTokenFile  string
 	)
 	flag.StringVar(&cfg.ExecutorImage, "executor-image", "", "默认执行器镜像(必填)")
+	flag.StringVar(&httpAddr, "http-addr", ":8080", "只读 HTTP 接口地址(GET /refs 列出仓库分支和 Tag,供 Headlamp 下拉选择),留空关闭")
+	flag.Func("git-allow-prefix", "允许查询分支的仓库地址前缀,必须以 / 结尾,可重复;不设置则 /refs 拒绝所有仓库", func(v string) error {
+		if !strings.HasSuffix(v, "/") {
+			return fmt.Errorf("prefix %q must end with '/'", v)
+		}
+		allowPrefixes = append(allowPrefixes, v)
+		return nil
+	})
+	flag.StringVar(&gitTokenFile, "git-token-file", "", "访问私有 http(s) 仓库的 token 文件(可选)")
 	flag.StringVar(&cfg.KanikoImage, "kaniko-image", "gcr.io/kaniko-project/executor:v1.23.2-debug", "构建镜像用的 kaniko(需带 shell 的 debug 版)")
 	flag.StringVar(&cfg.CAConfigMap, "ca-configmap", "", "含 build-ca.crt 的 ConfigMap(可选)")
 	flag.StringVar(&cfg.GitOpsSecret, "gitops-secret", "", "含 token 的 Secret,用于推送 GitOps 仓库(可选)")
@@ -69,6 +84,26 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if httpAddr != "" {
+		token := ""
+		if gitTokenFile != "" {
+			b, err := os.ReadFile(gitTokenFile)
+			if err != nil {
+				slog.Error("read git token", "err", err)
+				os.Exit(1)
+			}
+			token = strings.TrimSpace(string(b))
+		}
+		srv := &http.Server{Addr: httpAddr, Handler: gitrefs.NewLister(allowPrefixes, token).Handler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("http server", "err", err)
+				os.Exit(1)
+			}
+		}()
+		go func() { <-ctx.Done(); _ = srv.Close() }()
+	}
 
 	run := func(ctx context.Context) {
 		c := controller.New(cfg, dyn, kube, rec, *namespace, 10*time.Minute)

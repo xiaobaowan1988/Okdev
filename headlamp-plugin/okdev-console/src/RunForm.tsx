@@ -7,56 +7,62 @@ import {
   Box,
   Button,
   Checkbox,
-  Collapse,
-  IconButton,
+  CircularProgress,
+  FormControl,
+  FormHelperText,
+  InputLabel,
+  ListSubheader,
+  MenuItem,
   Paper,
+  Select,
   TextField,
   Typography,
 } from '@mui/material';
 import React from 'react';
 import { useHistory } from 'react-router-dom';
 import { EnvironmentSelect } from './EnvironmentSelect';
+import { useGitRefs } from './gitRefs';
 import {
   ANNOTATION_GIT_REF,
   ANNOTATION_GIT_REPO,
   ANNOTATION_GITOPS_BRANCH,
   ANNOTATION_GITOPS_PATH,
   ANNOTATION_GITOPS_REPO,
-  ReleaseTask,
 } from './ReleaseTask';
 import { ServiceItem, useServices } from './services';
 
-// 每个被选中的服务一行,各自的仓库、分支(以及可选的 GitOps 设置)互相独立。
-interface Row {
+// 每个被选中的服务一行。仓库和 GitOps 位置由平台通过工作负载注解固定,研发只选分支/Tag。
+interface Platform {
   repo: string;
-  ref: string;
+  ref: string; // 注解里的默认分支,可空
   gitopsRepo: string;
   gitopsBranch: string;
   gitopsPath: string;
 }
 
-function rowFor(s: ServiceItem): Row {
+function platformFor(s: ServiceItem): Platform {
   const a = s.obj.metadata.annotations || {};
   return {
     repo: a[ANNOTATION_GIT_REPO] || '',
-    ref: a[ANNOTATION_GIT_REF] || 'main',
+    ref: a[ANNOTATION_GIT_REF] || '',
     gitopsRepo: a[ANNOTATION_GITOPS_REPO] || '',
     gitopsBranch: a[ANNOTATION_GITOPS_BRANCH] || '',
     gitopsPath: a[ANNOTATION_GITOPS_PATH] || '',
   };
 }
 
-function buildTask(env: string, s: ServiceItem, r: Row) {
+function buildTask(env: string, s: ServiceItem, ref: string) {
+  const p = platformFor(s);
   const spec: any = {
     service: { name: s.name, kind: s.kind },
     environment: env,
-    git: { repo: r.repo.trim(), ref: r.ref.trim() },
+    git: { repo: p.repo, ref },
   };
-  if (r.gitopsRepo.trim()) {
+  if (p.gitopsRepo) {
     spec.gitops = {
-      repo: r.gitopsRepo.trim(),
-      ...(r.gitopsBranch.trim() && { branch: r.gitopsBranch.trim() }),
-      ...(r.gitopsPath.trim() && { path: r.gitopsPath.trim() }),
+      repo: p.gitopsRepo,
+      ...(p.gitopsBranch && { branch: p.gitopsBranch }),
+      ...(p.gitopsPath && { path: p.gitopsPath }),
     };
   }
   return {
@@ -68,17 +74,12 @@ function buildTask(env: string, s: ServiceItem, r: Row) {
 }
 
 // 运行工作流:一次选多个服务,每个服务各选分支;每个服务创建一个 ReleaseTask,互不影响。
-export function RunForm(props: {
-  env: string;
-  onEnvChange: (ns: string) => void;
-  tasks: ReleaseTask[];
-}) {
-  const { env, onEnvChange, tasks } = props;
+export function RunForm(props: { env: string; onEnvChange: (ns: string) => void }) {
+  const { env, onEnvChange } = props;
   const history = useHistory();
   const { items } = useServices(env);
   const [selected, setSelected] = React.useState<ServiceItem[]>([]);
-  const [rows, setRows] = React.useState<Record<string, Row>>({});
-  const [open, setOpen] = React.useState<Record<string, boolean>>({});
+  const [refs, setRefs] = React.useState<Record<string, string>>({}); // 服务 key -> 所选分支/Tag
   const [submitting, setSubmitting] = React.useState(false);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [created, setCreated] = React.useState<{ name: string; service: string }[]>([]);
@@ -86,33 +87,19 @@ export function RunForm(props: {
   // 换环境后,之前选的服务不再属于该环境
   React.useEffect(() => {
     setSelected([]);
-    setRows({});
+    setRefs({});
     setErrors({});
     setCreated([]);
   }, [env]);
 
-  // 每个服务以前用过的分支/Tag,作为分支输入框的候选
-  const refOptions = (service: string) => {
-    const seen = new Set<string>(['main', 'master']);
-    tasks.forEach(
-      t => t.spec?.service?.name === service && t.spec.git?.ref && seen.add(t.spec.git.ref)
-    );
-    return [...seen];
-  };
-
   const choose = (list: ServiceItem[]) => {
     setSelected(list);
-    setRows(prev => {
-      const next: Record<string, Row> = {};
-      list.forEach(s => (next[s.key] = prev[s.key] || rowFor(s)));
-      return next;
-    });
+    setRefs(prev =>
+      Object.fromEntries(Object.entries(prev).filter(([k]) => list.some(s => s.key === k)))
+    );
   };
-  const patch = (key: string, p: Partial<Row>) =>
-    setRows(prev => ({ ...prev, [key]: { ...prev[key], ...p } }));
 
-  const rowValid = (s: ServiceItem) => !!rows[s.key]?.repo.trim() && !!rows[s.key]?.ref.trim();
-  const valid = selected.length > 0 && selected.every(rowValid);
+  const valid = selected.length > 0 && selected.every(s => !!platformFor(s).repo && !!refs[s.key]);
 
   const submit = async () => {
     setSubmitting(true);
@@ -125,7 +112,7 @@ export function RunForm(props: {
         try {
           const res: any = await ApiProxy.post(
             `/apis/ci.okdev.io/v1/namespaces/${env}/releasetasks`,
-            buildTask(env, s, rows[s.key]),
+            buildTask(env, s, refs[s.key]),
             true,
             { cluster: getCluster() || undefined }
           );
@@ -178,100 +165,15 @@ export function RunForm(props: {
         />
       </Box>
 
-      {selected.map(s => {
-        const r = rows[s.key] || rowFor(s);
-        const hasGitops = !!(r.gitopsRepo || open[s.key]);
-        return (
-          <Box
-            key={s.key}
-            data-testid={`row-${s.name}`}
-            sx={{ mt: 2, p: 1.5, border: 1, borderColor: 'divider', borderRadius: 1 }}
-          >
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>
-              {s.name}{' '}
-              <Typography component="span" variant="caption" color="text.secondary">
-                {s.kind}
-              </Typography>
-            </Typography>
-            <Box
-              sx={{
-                display: 'grid',
-                gap: 2,
-                gridTemplateColumns: { xs: '1fr', md: '2fr 1fr auto' },
-                alignItems: 'center',
-              }}
-            >
-              <TextField
-                size="small"
-                label="Git 仓库"
-                value={r.repo}
-                onChange={e => patch(s.key, { repo: e.target.value })}
-                placeholder="https://github.com/org/app.git"
-                inputProps={{ 'data-testid': `repo-${s.name}` }}
-              />
-              <Autocomplete
-                freeSolo
-                size="small"
-                options={refOptions(s.name)}
-                inputValue={r.ref}
-                onInputChange={(_, v) => patch(s.key, { ref: v })}
-                renderInput={params => (
-                  <TextField
-                    {...params}
-                    label="分支 / Tag / Commit"
-                    inputProps={{ ...params.inputProps, 'data-testid': `ref-${s.name}` }}
-                  />
-                )}
-              />
-              <IconButton
-                size="small"
-                onClick={() => setOpen({ ...open, [s.key]: !hasGitops })}
-                title="GitOps 设置"
-              >
-                <Typography variant="caption">{hasGitops ? '收起' : 'GitOps'}</Typography>
-              </IconButton>
-            </Box>
-            <Collapse in={hasGitops}>
-              <Box
-                sx={{
-                  display: 'grid',
-                  gap: 2,
-                  mt: 1.5,
-                  gridTemplateColumns: { xs: '1fr', md: '2fr 1fr 2fr' },
-                }}
-              >
-                <TextField
-                  size="small"
-                  label="GitOps 仓库"
-                  value={r.gitopsRepo}
-                  onChange={e => patch(s.key, { gitopsRepo: e.target.value })}
-                  inputProps={{ 'data-testid': `gitops-repo-${s.name}` }}
-                />
-                <TextField
-                  size="small"
-                  label="分支"
-                  value={r.gitopsBranch}
-                  onChange={e => patch(s.key, { gitopsBranch: e.target.value })}
-                  placeholder="main"
-                />
-                <TextField
-                  size="small"
-                  label="配置目录"
-                  value={r.gitopsPath}
-                  onChange={e => patch(s.key, { gitopsPath: e.target.value })}
-                  placeholder="envs/dev/app"
-                  inputProps={{ 'data-testid': `gitops-path-${s.name}` }}
-                />
-              </Box>
-            </Collapse>
-            {errors[s.key] && (
-              <Alert severity="error" sx={{ mt: 1.5 }}>
-                创建失败:{errors[s.key]}
-              </Alert>
-            )}
-          </Box>
-        );
-      })}
+      {selected.map(s => (
+        <ServiceRow
+          key={s.key}
+          service={s}
+          value={refs[s.key] || ''}
+          onChange={v => setRefs(prev => ({ ...prev, [s.key]: v }))}
+          error={errors[s.key]}
+        />
+      ))}
 
       {created.length > 0 && (
         <Alert severity="success" sx={{ mt: 2 }} data-testid="created-tasks">
@@ -297,5 +199,99 @@ export function RunForm(props: {
         </Button>
       </Box>
     </Paper>
+  );
+}
+
+function ServiceRow(props: {
+  service: ServiceItem;
+  value: string;
+  onChange: (ref: string) => void;
+  error?: string;
+}) {
+  const { service: s, value, onChange, error } = props;
+  const p = platformFor(s);
+  const { refs, error: refsError, loading } = useGitRefs(p.repo);
+
+  // 候选加载完成后选默认值:注解里的默认分支 > 仓库默认分支 > 第一个分支
+  React.useEffect(() => {
+    if (!refs || value) return;
+    const all = [...refs.branches, ...refs.tags];
+    const pick = [p.ref, refs.default, refs.branches[0]].find(r => r && all.includes(r));
+    if (pick) onChange(pick);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refs]);
+
+  return (
+    <Box
+      data-testid={`row-${s.name}`}
+      sx={{ mt: 2, p: 1.5, border: 1, borderColor: 'divider', borderRadius: 1 }}
+    >
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>
+        {s.name}{' '}
+        <Typography component="span" variant="caption" color="text.secondary">
+          {s.kind}
+        </Typography>
+      </Typography>
+      {!p.repo ? (
+        <Alert severity="warning">
+          该服务没有配置 Git 仓库,请联系平台管理员在工作负载上添加注解 {ANNOTATION_GIT_REPO}。
+        </Alert>
+      ) : (
+        <Box
+          sx={{
+            display: 'grid',
+            gap: 2,
+            gridTemplateColumns: { xs: '1fr', md: '2fr 1fr' },
+            alignItems: 'center',
+          }}
+        >
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            data-testid={`repo-${s.name}`}
+            sx={{ wordBreak: 'break-all' }}
+          >
+            仓库:{p.repo}
+            {p.gitopsRepo && (
+              <>
+                <br />
+                部署配置:{p.gitopsRepo} {p.gitopsBranch} {p.gitopsPath}
+              </>
+            )}
+          </Typography>
+          <FormControl size="small" error={!!refsError}>
+            <InputLabel id={`ref-label-${s.name}`}>分支 / Tag</InputLabel>
+            <Select
+              labelId={`ref-label-${s.name}`}
+              label="分支 / Tag"
+              value={value}
+              disabled={loading || !refs}
+              onChange={e => onChange(e.target.value as string)}
+              data-testid={`ref-${s.name}`}
+              endAdornment={loading ? <CircularProgress size={16} sx={{ mr: 3 }} /> : undefined}
+            >
+              {refs && refs.branches.length > 0 && <ListSubheader>分支</ListSubheader>}
+              {refs?.branches.map(b => (
+                <MenuItem key={`b-${b}`} value={b}>
+                  {b}
+                </MenuItem>
+              ))}
+              {refs && refs.tags.length > 0 && <ListSubheader>Tag</ListSubheader>}
+              {refs?.tags.map(t => (
+                <MenuItem key={`t-${t}`} value={t}>
+                  {t}
+                </MenuItem>
+              ))}
+            </Select>
+            {refsError && <FormHelperText>无法获取分支列表:{refsError}</FormHelperText>}
+          </FormControl>
+        </Box>
+      )}
+      {error && (
+        <Alert severity="error" sx={{ mt: 1.5 }}>
+          创建失败:{error}
+        </Alert>
+      )}
+    </Box>
   );
 }

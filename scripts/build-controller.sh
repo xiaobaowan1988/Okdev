@@ -4,7 +4,7 @@ set -euo pipefail
 DIR=$(cd "$(dirname "$0")/.." && pwd)
 TAG=${1:-okdev-controller:dev}
 cd "$DIR"
-go test ./...
+go test ./cmd/... ./internal/...
 CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath -ldflags="-s -w" -o controller ./cmd/controller
 pgrep -x dockerd >/dev/null || { setsid nohup dockerd >/var/log/dockerd.log 2>&1 </dev/null & sleep 8; }
 docker build -q -t "$TAG" .

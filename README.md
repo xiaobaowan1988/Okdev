@@ -26,7 +26,7 @@ kubectl apply -k config   # 沙箱见下文 deploy/sandbox
 kubectl create -f config/samples/releasetask.yaml
 kubectl -n dev get rt -w        # PHASE / POD 列
 ```
-控制器参数:`--executor-image`(必填)、`--default-timeout`、`--namespace`、`--leader-elect`、`--kaniko-image`、`--executor-env`、`--ca-configmap`、`--gitops-secret`。
+控制器参数:`--executor-image`(必填)、`--http-addr`、`--git-allow-prefix`、`--git-token-file`、`--default-timeout`、`--namespace`、`--leader-elect`、`--kaniko-image`、`--executor-env`、`--ca-configmap`、`--gitops-secret`。
 
 ## 执行器
 `executor/` 是一个带 git + kustomize 的小镜像,入口 `okdev-executor <checkout|prepare|release>`。控制器把一个任务编排成一个 Pod 里的四步:
@@ -75,13 +75,16 @@ kubectl create ns dev   # 并把 build-ca ConfigMap 复制进 dev(沙箱出口 H
 ## Headlamp 插件(`headlamp-plugin/okdev-console`)
 - **`/services`(侧边栏「环境」,排障流)**:顶部环境(Namespace)下拉;四个 hook 并发订阅 Deployment / StatefulSet / CronJob / Job,合并成一张表,带"资源类型"列。服务名整页跳转到 Headlamp 原生详情页(`/c/<cluster>/{deployments|statefulsets|cronjobs|jobs}/<ns>/<name>`),Pod 列表、日志、终端都用原生功能。有 ownerReference 的 Job(CronJob 子任务、本项目的执行 Job)不列出。
 - 侧边栏只保留「环境」和「工作流」两项,其余原生菜单通过 `registerSidebarEntryFilter` 隐藏(路由仍在,从环境页点进去仍可用原生详情、日志、终端)。
-- **`/workflows`(发布流)**:选环境后**可多选服务**,每个服务一行,各自填 Git 仓库、分支/Tag/Commit(输入框的候选是该服务以前用过的 ref,也可手填)和可选的 GitOps 设置,点"运行"为每个服务各创建一个 `ReleaseTask`(并发创建,互不影响)。只选一个服务时直接跳转详情页;选多个时留在本页,显示各任务的链接,下方列表里实时看状态;个别服务创建失败时,成功的从表单移走,失败的保留并显示原因以便重试。表单默认值可由工作负载注解预填:`okdev.io/git-repo`、`okdev.io/git-ref`、`okdev.io/gitops-repo`、`okdev.io/gitops-branch`、`okdev.io/gitops-path`。
+- **`/workflows`(发布流)**:全部是选择,没有自由输入。选环境后**可多选服务**;每个服务一行,Git 仓库和 GitOps 位置(仓库、分支、目录)由平台通过工作负载注解固定、只读展示,研发只从下拉里选**分支或 Tag**(候选来自仓库实时列表,默认取注解 `okdev.io/git-ref` > 仓库默认分支 > 第一个分支)。点"运行"为每个服务各创建一个 `ReleaseTask`(并发,互不影响)。只选一个服务时直接跳转详情页;选多个时留在本页,显示各任务链接,下方列表看状态;个别服务创建失败时,成功的移出表单,失败的保留并显示原因。没有 `okdev.io/git-repo` 注解的服务会提示联系管理员,不能运行。
+  注解:`okdev.io/git-repo`(必需)、`okdev.io/git-ref`、`okdev.io/gitops-repo`、`okdev.io/gitops-branch`、`okdev.io/gitops-path`。
+  代价:不能再填 commit SHA 或不存在的 ref,只能发布已有的分支/Tag。
+  分支列表由控制器的只读接口 `GET /refs?repo=<url>`(go-git 的 `ls-remote`,30 秒缓存)提供,Headlamp 经 API Server 的服务代理 `…/services/okdev-controller:http/proxy/refs` 访问,沿用用户自己的身份,RBAC 见 `okdev-releasetask-editor`(只放行该 Service 的 proxy)。**必须用 `--git-allow-prefix`(以 `/` 结尾,可重复)配置允许查询的仓库前缀**,不配置则一律拒绝,防止控制器被当成任意 URL 的探测器;私有 http(s) 仓库用 `--git-token-file`。
 - **`/workflows/:namespace/:name`(任务详情)**:状态条(Pending → Running → Success/Failed)、失败原因、基本信息、按时间排序的 K8s Events 时间线、按步骤(checkout / prepare / build / release)分页的实时日志(`executorPodName` 出现后才加载,未开始的步骤显示"尚未开始";任务结束后停止 follow)。
   与设计文档的差异:路径多了 namespace,因为 `ReleaseTask` 是命名空间级资源。
 - 侧边栏底部的 "Create" 按钮也隐藏了(无官方开关,用 `MutationObserver` 只隐藏侧边栏抽屉里的那个,原生详情页里的按钮不受影响)。
 - 开发:`cd headlamp-plugin/okdev-console && npm install && npm run build|tsc|lint`。
 - 部署到集群:`scripts/deploy-headlamp.sh`(构建 → ConfigMap → 集群内 Headlamp),`kubectl -n okdev-system port-forward svc/headlamp 4466:80`,用 ServiceAccount token 登录。
-- 端到端脚本 `headlamp-plugin/e2e/`(Playwright,`TOKEN_FILE` 指向 token 文件):`node services.js`、`node workflows.js`、`node multi-service.js`。
+- 端到端脚本 `headlamp-plugin/e2e/`(Playwright,`TOKEN_FILE` 指向 token 文件):`node services.js`、`node workflows.js`(单服务,选已有分支)、`node multi-service.js`(多服务)。
 
 插件在 myk8s 集群上用浏览器实测通过(Headlamp 镜像 `ghcr.io/headlamp-k8s/headlamp:latest`,2026-10-25 拉取;k8s v1.37.1):
 - 服务页:切到 dev,列出 Deployment / StatefulSet / CronJob / Job 四类共 4 行,三类服务点击后分别落在对应原生路由。

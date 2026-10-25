@@ -1,0 +1,11 @@
+# Headlamp 通过 API Server 的服务代理访问:
+#   /api/v1/namespaces/okdev-system/services/okdev-controller:http/proxy/refs?repo=<url>
+apiVersion: v1
+kind: Service
+metadata:
+  name: okdev-controller
+  namespace: okdev-system
+spec:
+  selector: {app: okdev-controller}
+  ports:
+    - {name: http, port: 8080, targetPort: 8080}

@@ -18,7 +18,7 @@ export function WorkflowsView() {
   return (
     <>
       <SectionBox title="运行工作流">
-        <RunForm env={env} onEnvChange={setEnv} tasks={tasks || []} />
+        <RunForm env={env} onEnvChange={setEnv} />
       </SectionBox>
       <SectionBox title={`最近的发布任务(${env})`}>
         <Table<ReleaseTask>

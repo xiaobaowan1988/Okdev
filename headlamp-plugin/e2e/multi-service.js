@@ -7,9 +7,14 @@ const {open}=require('./lib');
   await p.getByRole('option',{name:/^hello/}).click(); await p.getByRole('option',{name:/^world/}).click();
   await p.keyboard.press('Escape');
   await p.waitForTimeout(500);
-  console.log('hello prefill:', await p.getByTestId('repo-hello').inputValue(), await p.getByTestId('ref-hello').inputValue());
-  console.log('world prefill:', await p.getByTestId('repo-world').inputValue(), await p.getByTestId('ref-world').inputValue());
-  await p.getByTestId('ref-world').fill('feature');   // 各自选分支
+  await p.waitForTimeout(2500);
+  console.log('free-text inputs in rows (expect 0):', await p.locator('[data-testid^=row-] input:not([aria-hidden])').count());
+  console.log('hello repo:', (await p.getByTestId('repo-hello').innerText()).replace(/\s+/g,' '));
+  console.log('hello default ref:', await p.getByTestId('ref-hello').innerText());
+  console.log('world default ref:', await p.getByTestId('ref-world').innerText());
+  await p.getByTestId('ref-world').click();           // 各自选分支:打开下拉
+  console.log('world options:', (await p.getByRole('option').allInnerTexts()).join(','));
+  await p.getByRole('option',{name:'feature'}).click();
   await p.screenshot({path:'m1.png', fullPage:true});
   console.log('button:', await p.getByTestId('run-button').innerText());
   await p.getByTestId('run-button').click();

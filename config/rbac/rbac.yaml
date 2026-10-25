@@ -62,3 +62,8 @@ rules:
   - apiGroups: [""]
     resources: [events]
     verbs: [get, list, watch]
+  # 运行工作流表单通过服务代理读取仓库的分支/Tag 列表
+  - apiGroups: [""]
+    resources: [services/proxy]
+    resourceNames: ["okdev-controller:http"]
+    verbs: [get]

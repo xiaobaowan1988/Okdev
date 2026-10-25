@@ -20,4 +20,5 @@ patches:
           - --executor-env=REGISTRY_PUSH=registry.deployer-build.svc:5000
           - --executor-env=REGISTRY_INSECURE=true
           - --executor-env=REGISTRY_PULL=localhost:30500
+          - --git-allow-prefix=git://192.0.2.2/
           - --leader-elect

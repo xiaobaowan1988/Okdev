@@ -4,3 +4,4 @@ resources:
   - crd/releasetasks.yaml
   - rbac/rbac.yaml
   - manager/deployment.yaml
+  - manager/service.yaml
