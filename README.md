@@ -73,8 +73,8 @@ kubectl create ns dev   # 并把 build-ca ConfigMap 复制进 dev(沙箱出口 H
 - 未验证:GitOps 走 HTTPS + token 推送(沙箱只测了 git:// 协议)、Kubernetes 在多副本选主切换下的行为、`spec.timeoutSeconds` 超时路径。
 
 ## Headlamp 插件(`headlamp-plugin/okdev-console`)
-- **`/services`(侧边栏「环境」,排障流)**:顶部环境(Namespace)下拉;四个 hook 并发订阅 Deployment / StatefulSet / CronJob / Job,合并成一张表,带"资源类型"列。服务名整页跳转到 Headlamp 原生详情页(`/c/<cluster>/{deployments|statefulsets|cronjobs|jobs}/<ns>/<name>`),Pod 列表、日志、终端都用原生功能。有 ownerReference 的 Job(CronJob 子任务、本项目的执行 Job)不列出。
-- 侧边栏只保留「环境」和「工作流」两项,其余原生菜单通过 `registerSidebarEntryFilter` 隐藏(路由仍在,从环境页点进去仍可用原生详情、日志、终端)。
+- **`/services`(侧边栏 Environment,排障流)**:顶部环境(Namespace)下拉;四个 hook 并发订阅 Deployment / StatefulSet / CronJob / Job,合并成一张表,带"资源类型"列。服务名整页跳转到 Headlamp 原生详情页(`/c/<cluster>/{deployments|statefulsets|cronjobs|jobs}/<ns>/<name>`),Pod 列表、日志、终端都用原生功能。有 ownerReference 的 Job(CronJob 子任务、本项目的执行 Job)不列出。
+- 侧边栏只保留 Environment 和 Workflows 两项,其余原生菜单通过 `registerSidebarEntryFilter` 隐藏(路由仍在,从环境页点进去仍可用原生详情、日志、终端)。
 - **`/workflows`(发布流)**:全部是选择,没有自由输入。选环境后**可多选服务**;每个服务一行,Git 仓库和 GitOps 位置(仓库、分支、目录)由平台通过工作负载注解固定、只读展示,研发只从下拉里选**分支或 Tag**(候选来自仓库实时列表,默认取注解 `okdev.io/git-ref` > 仓库默认分支 > 第一个分支)。点"运行"为每个服务各创建一个 `ReleaseTask`(并发,互不影响)。只选一个服务时直接跳转详情页;选多个时留在本页,显示各任务链接,下方列表看状态;个别服务创建失败时,成功的移出表单,失败的保留并显示原因。没有 `okdev.io/git-repo` 注解的服务会提示联系管理员,不能运行。
   注解:`okdev.io/git-repo`(必需)、`okdev.io/git-ref`、`okdev.io/gitops-repo`、`okdev.io/gitops-branch`、`okdev.io/gitops-path`。
   代价:不能再填 commit SHA 或不存在的 ref,只能发布已有的分支/Tag。

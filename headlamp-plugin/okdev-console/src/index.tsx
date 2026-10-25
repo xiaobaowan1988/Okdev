@@ -13,14 +13,14 @@ import { WorkflowsView } from './WorkflowsView';
 registerSidebarEntry({
   parent: null,
   name: 'okdev-services',
-  label: '环境',
+  label: 'Environment',
   url: '/services',
   icon: 'mdi:apps',
 });
 registerSidebarEntry({
   parent: null,
   name: 'okdev-workflows',
-  label: '工作流',
+  label: 'Workflows',
   url: '/workflows',
   icon: 'mdi:rocket-launch',
 });

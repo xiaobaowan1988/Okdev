@@ -12,10 +12,10 @@ export function EnvironmentSelect(props: {
   const names = (namespaces || []).map(n => n.metadata.name).sort();
   return (
     <FormControl size="small" sx={{ minWidth: 220 }}>
-      <InputLabel id="okdev-env-label">{props.label || '环境 (Environment)'}</InputLabel>
+      <InputLabel id="okdev-env-label">{props.label || 'Environment'}</InputLabel>
       <Select
         labelId="okdev-env-label"
-        label={props.label || '环境 (Environment)'}
+        label={props.label || 'Environment'}
         value={names.includes(props.value) ? props.value : ''}
         onChange={e => props.onChange(e.target.value as string)}
         data-testid="env-select"

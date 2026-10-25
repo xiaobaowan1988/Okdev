@@ -12,19 +12,19 @@ export function ServicesView() {
 
   return (
     <SectionBox
-      title="环境 (Environment)"
+      title="Environment"
       headerProps={{ actions: [<EnvironmentSelect key="env" value={env} onChange={setEnv} />] }}
     >
       {errors.length > 0 && (
         <Typography color="error" sx={{ mb: 1 }}>
-          部分资源加载失败:{errors.join('; ')}
+          Some resources failed to load: {errors.join('; ')}
         </Typography>
       )}
       <Table<ServiceItem>
         data={loading ? null : items}
         columns={[
           {
-            header: '服务',
+            header: 'Service',
             accessorKey: 'name',
             // getDetailsLink() 按资源类型给出原生路由:deployments / statefulsets / cronjobs / jobs。
             // 不用 Headlamp 的 <Link>:新版默认在侧边抽屉里打开详情,这里要整页跳转。
@@ -34,23 +34,23 @@ export function ServicesView() {
               </MuiLink>
             ),
           },
-          { header: '资源类型 (Kind)', accessorKey: 'kind' },
-          { header: '环境', accessorKey: 'namespace' },
+          { header: 'Kind', accessorKey: 'kind' },
+          { header: 'Environment', accessorKey: 'namespace' },
           {
-            header: '状态',
+            header: 'Status',
             accessorFn: (s: ServiceItem) => statusText(s),
           },
           {
-            header: '创建时间',
+            header: 'Age',
             accessorFn: (s: ServiceItem) => s.obj.metadata.creationTimestamp,
             Cell: ({ row }: any) => row.original.obj.getAge?.() ?? '',
           },
         ]}
-        emptyMessage={`环境 ${env} 下没有服务`}
+        emptyMessage={`No services in environment ${env}`}
       />
       <Box sx={{ mt: 1 }}>
         <Typography variant="caption" color="text.secondary">
-          由 CronJob 或其他控制器创建的 Job 不单独列出。
+          Jobs created by a CronJob or another controller are not listed separately.
         </Typography>
       </Box>
     </SectionBox>

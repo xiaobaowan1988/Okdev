@@ -17,31 +17,31 @@ export function WorkflowsView() {
 
   return (
     <>
-      <SectionBox title="运行工作流">
+      <SectionBox title="Run workflow">
         <RunForm env={env} onEnvChange={setEnv} />
       </SectionBox>
-      <SectionBox title={`最近的发布任务(${env})`}>
+      <SectionBox title={`Recent release tasks (${env})`}>
         <Table<ReleaseTask>
           data={tasks === null ? null : sorted}
           columns={[
             {
-              header: '任务',
+              header: 'Task',
               accessorFn: (t: ReleaseTask) => t.metadata.name,
               Cell: ({ row }: any) => (
                 <Link kubeObject={row.original}>{row.original.metadata.name}</Link>
               ),
             },
-            { header: '服务', accessorFn: (t: ReleaseTask) => t.spec?.service?.name },
+            { header: 'Service', accessorFn: (t: ReleaseTask) => t.spec?.service?.name },
             { header: 'Kind', accessorFn: (t: ReleaseTask) => t.spec?.service?.kind },
             { header: 'Git Ref', accessorFn: (t: ReleaseTask) => t.spec?.git?.ref },
             {
-              header: '状态',
+              header: 'Status',
               accessorFn: (t: ReleaseTask) => t.phase,
               Cell: ({ row }: any) => <PhaseChip phase={row.original.phase} />,
             },
-            { header: '创建时间', accessorFn: (t: ReleaseTask) => t.getAge() },
+            { header: 'Age', accessorFn: (t: ReleaseTask) => t.getAge() },
           ]}
-          emptyMessage="还没有发布任务"
+          emptyMessage="No release tasks yet"
         />
       </SectionBox>
     </>

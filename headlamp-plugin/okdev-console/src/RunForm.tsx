@@ -143,7 +143,7 @@ export function RunForm(props: { env: string; onEnvChange: (ns: string) => void 
   return (
     <Paper variant="outlined" sx={{ p: 2 }}>
       <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: '1fr 2fr' } }}>
-        <EnvironmentSelect value={env} onChange={onEnvChange} label="目标环境" />
+        <EnvironmentSelect value={env} onChange={onEnvChange} label="Target environment" />
         <Autocomplete
           multiple
           disableCloseOnSelect
@@ -160,7 +160,7 @@ export function RunForm(props: { env: string; onEnvChange: (ns: string) => void 
             </li>
           )}
           renderInput={params => (
-            <TextField {...params} label="服务(可多选)" data-testid="service-input" />
+            <TextField {...params} label="Services (multiple)" data-testid="service-input" />
           )}
         />
       </Box>
@@ -177,7 +177,7 @@ export function RunForm(props: { env: string; onEnvChange: (ns: string) => void 
 
       {created.length > 0 && (
         <Alert severity="success" sx={{ mt: 2 }} data-testid="created-tasks">
-          已创建 {created.length} 个任务:
+          Created {created.length} task(s):
           {created.map(c => (
             <span key={c.name} style={{ marginLeft: 8 }}>
               <Link routeName="okdev-workflow-detail" params={{ namespace: env, name: c.name }}>
@@ -195,7 +195,11 @@ export function RunForm(props: { env: string; onEnvChange: (ns: string) => void 
           onClick={submit}
           data-testid="run-button"
         >
-          {submitting ? '创建中…' : selected.length > 1 ? `运行 ${selected.length} 个服务` : '运行'}
+          {submitting
+            ? 'Creating…'
+            : selected.length > 1
+            ? `Run ${selected.length} services`
+            : 'Run'}
         </Button>
       </Box>
     </Paper>
@@ -234,7 +238,8 @@ function ServiceRow(props: {
       </Typography>
       {!p.repo ? (
         <Alert severity="warning">
-          该服务没有配置 Git 仓库,请联系平台管理员在工作负载上添加注解 {ANNOTATION_GIT_REPO}。
+          This service has no Git repository configured. Ask a platform admin to add the annotation{' '}
+          {ANNOTATION_GIT_REPO} to the workload.
         </Alert>
       ) : (
         <Box
@@ -251,45 +256,45 @@ function ServiceRow(props: {
             data-testid={`repo-${s.name}`}
             sx={{ wordBreak: 'break-all' }}
           >
-            仓库:{p.repo}
+            Repository: {p.repo}
             {p.gitopsRepo && (
               <>
                 <br />
-                部署配置:{p.gitopsRepo} {p.gitopsBranch} {p.gitopsPath}
+                Deploy config: {p.gitopsRepo} {p.gitopsBranch} {p.gitopsPath}
               </>
             )}
           </Typography>
           <FormControl size="small" error={!!refsError}>
-            <InputLabel id={`ref-label-${s.name}`}>分支 / Tag</InputLabel>
+            <InputLabel id={`ref-label-${s.name}`}>Branch / Tag</InputLabel>
             <Select
               labelId={`ref-label-${s.name}`}
-              label="分支 / Tag"
+              label="Branch / Tag"
               value={value}
               disabled={loading || !refs}
               onChange={e => onChange(e.target.value as string)}
               data-testid={`ref-${s.name}`}
               endAdornment={loading ? <CircularProgress size={16} sx={{ mr: 3 }} /> : undefined}
             >
-              {refs && refs.branches.length > 0 && <ListSubheader>分支</ListSubheader>}
+              {refs && refs.branches.length > 0 && <ListSubheader>Branches</ListSubheader>}
               {refs?.branches.map(b => (
                 <MenuItem key={`b-${b}`} value={b}>
                   {b}
                 </MenuItem>
               ))}
-              {refs && refs.tags.length > 0 && <ListSubheader>Tag</ListSubheader>}
+              {refs && refs.tags.length > 0 && <ListSubheader>Tags</ListSubheader>}
               {refs?.tags.map(t => (
                 <MenuItem key={`t-${t}`} value={t}>
                   {t}
                 </MenuItem>
               ))}
             </Select>
-            {refsError && <FormHelperText>无法获取分支列表:{refsError}</FormHelperText>}
+            {refsError && <FormHelperText>Could not load branches: {refsError}</FormHelperText>}
           </FormControl>
         </Box>
       )}
       {error && (
         <Alert severity="error" sx={{ mt: 1.5 }}>
-          创建失败:{error}
+          Creation failed: {error}
         </Alert>
       )}
     </Box>

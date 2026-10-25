@@ -31,13 +31,15 @@ export function TaskDetail() {
   const [task, error] = ReleaseTask.useGet(name, namespace);
 
   if (error && !task)
-    return <Alert severity="error">加载任务失败:{String((error as any).message || error)}</Alert>;
-  if (!task) return <Loader title="加载任务" />;
+    return (
+      <Alert severity="error">Failed to load task: {String((error as any).message || error)}</Alert>
+    );
+  if (!task) return <Loader title="Loading task" />;
 
   return (
     <>
       <BackLink />
-      <SectionBox title={`发布任务 ${name}`}>
+      <SectionBox title={`Release task ${name}`}>
         <PhaseBar phase={task.phase} />
         {task.status.message && (
           <Alert
@@ -50,9 +52,9 @@ export function TaskDetail() {
         )}
         <NameValueTable
           rows={[
-            { name: '状态', value: <PhaseChip phase={task.phase} /> },
-            { name: '服务', value: `${task.spec.service.name} (${task.spec.service.kind})` },
-            { name: '环境', value: task.spec.environment },
+            { name: 'Status', value: <PhaseChip phase={task.phase} /> },
+            { name: 'Service', value: `${task.spec.service.name} (${task.spec.service.kind})` },
+            { name: 'Environment', value: task.spec.environment },
             { name: 'Git', value: `${task.spec.git.repo} @ ${task.spec.git.ref}` },
             ...(task.spec.gitops
               ? [
@@ -64,20 +66,20 @@ export function TaskDetail() {
                   },
                 ]
               : []),
-            { name: '开始时间', value: task.status.startTime || '-' },
-            { name: '结束时间', value: task.status.completionTime || '-' },
+            { name: 'Started', value: task.status.startTime || '-' },
+            { name: 'Finished', value: task.status.completionTime || '-' },
             {
-              name: '执行 Pod',
+              name: 'Executor pod',
               value: task.status.executorPodName || '-',
               hide: !task.status.executorPodName,
             },
           ]}
         />
       </SectionBox>
-      <SectionBox title="执行事件">
+      <SectionBox title="Events">
         <TaskEvents task={task} />
       </SectionBox>
-      <SectionBox title="执行日志">
+      <SectionBox title="Logs">
         <TaskLogs task={task} />
       </SectionBox>
     </>
@@ -111,7 +113,7 @@ function TaskEvents({ task }: { task: ReleaseTask }) {
     namespace: task.metadata.namespace,
     fieldSelector: `involvedObject.kind=ReleaseTask,involvedObject.name=${task.metadata.name}`,
   });
-  if (events === null) return <Loader title="加载事件" />;
+  if (events === null) return <Loader title="Loading events" />;
   const sorted = events
     .slice()
     .sort((a, b) =>
@@ -119,7 +121,7 @@ function TaskEvents({ task }: { task: ReleaseTask }) {
         String(b.lastOccurrence || b.metadata.creationTimestamp)
       )
     );
-  if (sorted.length === 0) return <Typography color="text.secondary">暂无事件</Typography>;
+  if (sorted.length === 0) return <Typography color="text.secondary">No events yet</Typography>;
   return (
     <ol data-testid="event-timeline" style={{ margin: 0, paddingLeft: 20 }}>
       {sorted.map(e => (
@@ -157,12 +159,17 @@ function TaskLogs({ task }: { task: ReleaseTask }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pod?.metadata.uid, step, started, task.phase]);
 
-  if (!podName) return <Typography color="text.secondary">等待控制器创建执行 Pod…</Typography>;
-  if (!pod) return <Loader title="加载执行 Pod" />;
+  if (!podName)
+    return (
+      <Typography color="text.secondary">
+        Waiting for the controller to create the executor pod…
+      </Typography>
+    );
+  if (!pod) return <Loader title="Loading executor pod" />;
   return (
     <>
       <Typography variant="body2" sx={{ mb: 1 }}>
-        执行 Pod:<Link kubeObject={pod}>{podName}</Link>
+        Executor pod: <Link kubeObject={pod}>{podName}</Link>
       </Typography>
       <Tabs value={step} onChange={(_, v) => setStep(v)}>
         {STEPS.map(s => (
@@ -174,7 +181,7 @@ function TaskLogs({ task }: { task: ReleaseTask }) {
           <LogViewer logs={logs} open onClose={() => {}} noDialog title={step} />
         ) : (
           <Typography color="text.secondary" sx={{ p: 2 }}>
-            该步骤尚未开始
+            This step has not started yet
           </Typography>
         )}
       </div>
