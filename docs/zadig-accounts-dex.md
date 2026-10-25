@@ -43,14 +43,14 @@ Zadig 和 Dex 用的都是 bcrypt,因此把哈希复制进 Dex 的静态账号,�
    **用户名取 `name` 这个声明**:Dex 的静态账号不会输出 `preferred_username`(用它会让 apiserver 报 `claim not present`,所有人 401),
    `name` 才是 Zadig 账号名。这样用户名和邮箱登录得到的 K8s 用户相同。
 5. **授权**:登录只证明身份,权限由 RBAC 决定。K8s 用户名是 `dex:` + **Zadig 账号名**(例如 `dex:alice`),见 `deploy/dex-sandbox/developers.yaml`。
-   Dex 默认登录页写的是 "Email Address",`deploy/dex/password.html` 把它改成"用户名或邮箱"(需要配置 `frontend.dir`,已在配置模板里)。
+   Dex 默认登录页写的是 "Email Address",`deploy/dex/password.html` 把它改成 "Username or email"(需要配置 `frontend.dir`,已在配置模板里)。
 
 ## 沙箱实测(myk8s 集群,Zadig 真实建表脚本 + 模拟账号)
 | 场景 | 结果 |
 |---|---|
 | alice 用**用户名**、**邮箱**、**大写用户名**登录 | 都进入 Headlamp;`SelfSubjectReview` 显示 K8s 用户都是 `dex:alice` |
 | alice(已授权)用用户名登录后,选 dev、选服务、运行工作流 | 任务成功;`can-i`:能创建发布任务、能 exec、能看日志、不能读 Secret |
-| alice 输错密码 | Dex 拒绝:`用户名/邮箱或密码错误。` |
+| alice 输错密码 | Dex 拒绝:`Invalid username/email or password.` |
 | bob 密码正确,但没授权 | 能登录,身份是 `dex:bob`,但环境下拉为空、不能创建任务(登录 ≠ 授权) |
 | carol(Zadig 里没有邮箱) | **用户名可登录**,邮箱登录不可用 |
 | dave(邮箱与 bob 重复) | 用户名可登录,邮箱登录不可用(邮箱归 bob) |
