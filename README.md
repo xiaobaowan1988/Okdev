@@ -1,94 +1,100 @@
 # okdev
 
-Headlamp 开发者控制台的后端:`ReleaseTask` CRD + Go 控制器(设计见架构文档第 3.2 节)。
-
-研发在前端创建 `ReleaseTask`,控制器为它拉起一个 K8s `Job`(init 容器克隆代码,主容器执行构建/GitOps 更新),
-并把 `phase` 和 `executorPodName` 写回 `status`,前端据此展示进度条并读取该 Pod 的日志。
+研发控制台:Headlamp 插件 + `ReleaseTask` CRD 控制器 + 登录(Dex)。**构建、部署、环境、历史都由 [myk8s](../myk8s) 的 deployer 负责**,
+okdev 只是它面向开发的、K8s 原生的入口。
 
 ```
-ReleaseTask 创建 ──> Controller 创建 Job(ownerReference 指向任务)
-                          │ Job / Pod 事件
-                          ▼
-         status.phase: Pending -> Running -> Success | Failed
-         status.executorPodName / jobName / startTime / completionTime / message
-         Events: JobCreated / Running / Succeeded / Failed / InvalidSpec / JobLost
+研发 ─> Headlamp(Environment / Workflow 两个页面)
+          │ 创建 ReleaseTask(命名空间 okdev-releases;RBAC 管谁能发布)
+          ▼
+   okdev 控制器 ──提交流水线运行──> deployer(MySQL 存 环境×服务 的期望状态)──> Argo CD ──> 集群
+          ▲  轮询运行状态(Pending→Running→Success/Failed)         │
+          └──────────── 状态、镜像、失败原因、运行号写回 status ◀──┘
+   Headlamp 读环境/构建器/分支/日志 ──经 API Server 服务代理──> 控制器只读接口 ──> deployer
 ```
+
+## 为什么不自己部署
+十几个环境、几百个服务,"每个环境一个目录/一份清单"是几千份文件。deployer 的做法是:每个服务只有**一份**清单,
+"哪个服务部署到哪些环境、副本数、镜像"是 MySQL 里的几行数据。okdev 不重复这套,只做入口。
 
 ## 布局
-- `internal/api/v1`:类型、GVR、spec 校验(`ci.okdev.io/v1`,改组名只需改常量和 CRD)
-- `internal/controller`:`BuildJob`(生成 Job)、`ComputeStatus`(纯函数,算阶段)、`Controller`(informer + 工作队列 + 调谐)
-- `config/`:CRD、RBAC、Deployment、示例;`kubectl apply -k config`
+- `cmd/controller`、`internal/controller`:`ReleaseTask` 控制器。提交运行、轮询状态、写回 `status`、发 Events。
+- `internal/deployer`:deployer 的 HTTP 客户端。
+- `internal/gateway`:控制器给界面用的**只读**接口(环境、构建器、分支/Tag、环境里的服务、运行日志),只暴露界面需要的字段。
+- `internal/gitrefs`:列仓库的分支/Tag(go-git 的 `ls-remote`,30 秒缓存);仓库地址只来自 deployer 里登记的构建器,调用方不能指定任意 URL。
+- `headlamp-plugin/okdev-console`:Headlamp 插件(英文界面)。`headlamp-plugin/e2e`:Playwright 端到端脚本。
+- `cmd/zadig-export`、`cmd/dex-users`、`deploy/dex`、`deploy/headlamp-dex`:登录,见 [docs/zadig-accounts-dex.md](docs/zadig-accounts-dex.md);Google 登录见 [docs/google-auth.md](docs/google-auth.md)。
+- `config/`:CRD、RBAC、控制器;`deploy/`:沙箱和 Headlamp/Dex 的部署;`test/zadig`:沙箱造数据和证书。
 
-## 运行
+## ReleaseTask
+```yaml
+apiVersion: ci.okdev.io/v1
+kind: ReleaseTask
+metadata: {generateName: api-, namespace: okdev-releases}
+spec:
+  service: api            # deployer 里登记的服务
+  builder: api-main       # 关联该服务的构建器
+  environment: dev3       # deployer 里的环境(不是 K8s 命名空间)
+  ref: master             # 分支或 Tag;留空用构建器默认值
+```
+- **spec 不可变**:重跑 = 新建一个 `ReleaseTask`,一个任务对应一次 deployer 运行。
+- 状态:`phase`(Pending/Running/Success/Failed)、`stage`(deployer 的原始状态:pending/building/deploying/succeeded/failed/cancelled)、
+  `runID`、`image`、`message`(失败原因,直接取自 deployer)、起止时间。取消的运行显示为 Failed。
+- **不会重复提交**:先写"提交中"标记再提交。提交结果不明(请求可能已到达 deployer 时出错、或提交过程中控制器重启)时,任务直接置 Failed 并写明原因,
+  让人去 deployer 里确认,不自动重试。deployer 不可达时不写标记、不失败,等它恢复后再提交。
+- 状态以 deployer 为准:控制器重启不影响进行中的运行,恢复后继续轮询。
+- 删除 `ReleaseTask` **不会取消**deployer 里的运行。
+- 控制器只监听 `okdev-releases` 命名空间(`--namespace`),其他命名空间里的任务不处理。
+
+## 界面(Headlamp 插件)
+侧边栏只保留两项,其余原生菜单隐藏(路由还在,从环境页点进去仍能用原生详情、日志、终端;隐藏不是权限控制)。
+- **Environment**:环境下拉来自 deployer;表格是该环境里的服务(镜像、副本数、Argo CD 同步/健康状态,每 5 秒刷新)。
+  服务名跳到原生工作负载页。**每个(环境,服务)在自己的命名空间里:`<环境>-env-<服务>`**,不是"环境 = 命名空间"。
+- **Workflow**:选环境,**多选服务**;每个服务一行:构建器(多个时可选)、仓库(只读)、**分支/Tag 下拉**(实时来自仓库,默认取构建器的默认分支)。
+  没有自由输入,不能发布不存在的分支。点 Run 为每个服务各创建一个 `ReleaseTask`;只选一个服务时直接进详情页,选多个时留在本页,下方列表看进度;
+  个别服务创建失败时,成功的移出表单,失败的保留并显示原因。
+- **任务详情** `/workflows/okdev-releases/<name>`:状态条、阶段、构建器/分支/镜像/运行号、Events 时间线、构建日志
+  (来自 deployer:构建中是实时日志,结束后是保存的完整日志;未结束每 3 秒刷新)。
+- 侧边栏底部的 "Create" 按钮也隐藏了(无官方开关,用 `MutationObserver`,展开和收起两种形态都处理)。
+
+## 权限
+- 控制器:只在 `okdev-releases` 里读写 `ReleaseTask` 和 `status`、写 Events;**不需要 Job/Pod/Secret 权限**(构建部署由 deployer 做)。
+- 研发(`config/rbac/developer.yaml`,绑定示例见 `deploy/dex-sandbox/developers.yaml`):
+  - `okdev-release-submitter`(Role,仅 `okdev-releases`):创建/查看/删除发布任务和事件;
+  - `okdev-developer`(ClusterRole):列命名空间、进容器终端;
+  - `okdev-console-reader`(Role,仅 `okdev-system`):读控制器只读接口;
+  - 再加内置 `view`(只读工作负载、Pod、日志,不含 Secret)。
+- **没有环境级授权**:谁能创建 `ReleaseTask`,就能发布到 deployer 里的任意环境(包括生产)。deployer 自己也没有按用户鉴权(只有可选的 `API_TOKEN` 和 `X-Actor`)。
+  需要"某人只能发某些环境"时,要在 `ReleaseTask` 上加准入策略(例如 ValidatingAdmissionPolicy 按用户限制 `spec.environment`),**目前没做**。
+- **操作人**:deployer 历史里的操作人是控制器(`--actor`),不是真人;真人在 `ReleaseTask` 的创建者和 K8s 审计日志里。
+- 控制器的只读接口读 deployer 用的是控制器自己的令牌,所以能访问该接口的人可以看到 deployer 里所有环境和服务,不受环境限制。
+
+## 运行(沙箱,myk8s 集群)
 ```bash
-go test ./...
-kubectl apply -k config   # 沙箱见下文 deploy/sandbox
+cd ../myk8s
+sudo ./scripts/install.sh
+./scripts/install-argocd.sh && ./scripts/deploy-apps.sh && ./scripts/deploy-mysql.sh && ./scripts/deploy-build.sh
+./scripts/build-deployer.sh && kubectl apply -k manifests/deployer/app          # deployer + 构建/仓库
+# 在 deployer 里登记环境、服务、构建模板、构建器、流水线(见 myk8s/deployer/README.md)
+cd ../okdev
+./scripts/build-controller.sh && kubectl apply -k deploy/sandbox                  # 控制器
 kubectl create -f config/samples/releasetask.yaml
-kubectl -n dev get rt -w        # PHASE / POD 列
+kubectl -n okdev-releases get rt -w
 ```
-控制器参数:`--executor-image`(必填)、`--http-addr`、`--git-allow-prefix`、`--git-token-file`、`--default-timeout`、`--namespace`、`--leader-elect`、`--kaniko-image`、`--executor-env`、`--ca-configmap`、`--gitops-secret`。
+`deploy/sandbox` 里的沙箱设置:控制器镜像用本地导入的,并信任沙箱出口网关的 CA(ConfigMap `build-ca` 复制到 `okdev-system`)。
+Headlamp:`scripts/deploy-headlamp.sh`(`HEADLAMP_OVERLAY` 选登录方式)。登录:默认粘贴 ServiceAccount token;Zadig 账号和 Google 登录见 docs。
 
-## 执行器
-`executor/` 是一个带 git + kustomize 的小镜像,入口 `okdev-executor <checkout|prepare|release>`。控制器把一个任务编排成一个 Pod 里的四步:
-
-| 步骤 | 类型 | 镜像 | 做什么 |
-|---|---|---|---|
-| `checkout` | init | executor | clone 并 checkout 到 `spec.git.ref` |
-| `prepare` | init | executor | 校验 Dockerfile,用提交短 SHA 作镜像 tag,写出 kaniko 参数 |
-| `build` | init | kaniko(debug 版) | 构建并推送到 `REGISTRY_PUSH` |
-| `release` | 主容器 | executor | clone GitOps 仓库,`kustomize edit set image <服务名>=<REGISTRY_PULL>/<服务名>:<sha>`,commit 并 push(冲突自动 rebase 重试) |
-
-kaniko 构建时会改写自己容器的根文件系统,所以必须是独立容器。同一提交重复发布时配置无变化,不产生新 commit。
-GitOps 里 kustomization 的 `images` 按**服务名**匹配工作负载里的镜像名。
-
-执行器的输入全部走环境变量:`TASK_NAME SERVICE_NAME SERVICE_KIND ENVIRONMENT GIT_REPO GIT_REF GITOPS_*` 由控制器按任务填,
-`REGISTRY_PUSH`(必填)、`REGISTRY_PULL`、`REGISTRY_INSECURE`、`DOCKERFILE`、`BUILD_CONTEXT` 由控制器的 `--executor-env KEY=VALUE` 提供。
-推送 GitOps 仓库的凭据放 Secret(key `token`),用 `--gitops-secret` 指定,以 HTTP header 传递。
-Pod 不挂载 ServiceAccount token。步骤失败时,`status.message` 取容器日志的最后一行(如 `fatal: invalid reference: nope`)。
-`spec.executor.image/command` 只覆盖 `release` 步骤。
-
-## 在 myk8s 集群上验证
-```bash
-(cd ../myk8s && sudo ./scripts/install.sh && ./scripts/deploy-build.sh)   # 集群 + 集群内 registry
-./scripts/build-executor.sh && ./scripts/build-controller.sh               # 构建并导入 containerd
-kubectl apply -k deploy/sandbox                                            # 控制器(沙箱参数)
-kubectl create ns dev   # 并把 build-ca ConfigMap 复制进 dev(沙箱出口 HTTPS 被中间人时需要)
-```
-实测见下文"验证情况"。
-
-## 设计取舍
-- **spec 不可变**(CRD 校验 `self == oldSelf`):重跑 = 新建一个 `ReleaseTask`,保证每个任务和一次执行一一对应。
-- **Job 被删不重建**:已创建过 Job 却找不到时直接置 Failed,避免重复发布。
-- **终态不再改写**;任务删除时 Job/Pod 由 ownerReference 级联回收,Pod 日志保留到那时。
-- 只用 client-go(dynamic + informer),不依赖 controller-runtime 和代码生成。
-- 前端只需 `create/get/list/watch` ReleaseTask(见 `okdev-releasetask-editor` ClusterRole),`status` 只有控制器能写。
+控制器参数:`--deployer-url`、`--deployer-token-file`、`--default-pipeline`(`build-and-deploy`)、`--poll-interval`、`--actor`、`--namespace`、
+`--http-addr`、`--git-token-file`、`--leader-elect`。
 
 ## 验证情况
-- fake client 测试(`go test -race`):状态机、Job 生成、注入安全、完整生命周期、非法 spec、Job 被删。
-- 在 myk8s 单节点集群(k8s v1.37.1)上端到端实测,git 源用宿主机 `git daemon`:
-  - 发布成功:`Pending → Running → Success`,`executorPodName` 正确写回;kaniko 推镜像到集群内 registry;GitOps 仓库多一个 commit,`images` 指向 `localhost:30500/hello:<sha>`;按该配置 `kubectl apply -k` 后 Pod 跑起来并输出 `built-by-okdev`。
-  - 同一提交再发布:`Success`,GitOps 仓库不产生新 commit。
-  - 不存在的 ref:`Failed`,`message` 为 `container checkout exited with code 128: fatal: invalid reference: nope`。
-- 实测前发现并修复了两个缓存滞后导致的竞态:informer 缓存里任务/Job 落后于刚写的 status/刚建的 Job 时,会把刚建的 Job 误判为丢失、或在 Job 被删后重复创建。现在判定"丢失"和"创建"前都向 API server 确认。
-- 未验证:GitOps 走 HTTPS + token 推送(沙箱只测了 git:// 协议)、Kubernetes 在多副本选主切换下的行为、`spec.timeoutSeconds` 超时路径。
-
-## Headlamp 插件(`headlamp-plugin/okdev-console`)
-- **`/services`(侧边栏 Environment,排障流)**:顶部环境(Namespace)下拉;四个 hook 并发订阅 Deployment / StatefulSet / CronJob / Job,合并成一张表,带"资源类型"列。服务名整页跳转到 Headlamp 原生详情页(`/c/<cluster>/{deployments|statefulsets|cronjobs|jobs}/<ns>/<name>`),Pod 列表、日志、终端都用原生功能。有 ownerReference 的 Job(CronJob 子任务、本项目的执行 Job)不列出。
-- 侧边栏只保留 Environment 和 Workflow 两项,其余原生菜单通过 `registerSidebarEntryFilter` 隐藏(路由仍在,从环境页点进去仍可用原生详情、日志、终端)。
-- **`/workflows`(发布流)**:全部是选择,没有自由输入。选环境后**可多选服务**;每个服务一行,Git 仓库和 GitOps 位置(仓库、分支、目录)由平台通过工作负载注解固定、只读展示,研发只从下拉里选**分支或 Tag**(候选来自仓库实时列表,默认取注解 `okdev.io/git-ref` > 仓库默认分支 > 第一个分支)。点"运行"为每个服务各创建一个 `ReleaseTask`(并发,互不影响)。只选一个服务时直接跳转详情页;选多个时留在本页,显示各任务链接,下方列表看状态;个别服务创建失败时,成功的移出表单,失败的保留并显示原因。没有 `okdev.io/git-repo` 注解的服务会提示联系管理员,不能运行。
-  注解:`okdev.io/git-repo`(必需)、`okdev.io/git-ref`、`okdev.io/gitops-repo`、`okdev.io/gitops-branch`、`okdev.io/gitops-path`。
-  代价:不能再填 commit SHA 或不存在的 ref,只能发布已有的分支/Tag。
-  分支列表由控制器的只读接口 `GET /refs?repo=<url>`(go-git 的 `ls-remote`,30 秒缓存)提供,Headlamp 经 API Server 的服务代理 `…/services/okdev-controller:http/proxy/refs` 访问,沿用用户自己的身份,RBAC 见 `okdev-releasetask-editor`(只放行该 Service 的 proxy)。**必须用 `--git-allow-prefix`(以 `/` 结尾,可重复)配置允许查询的仓库前缀**,不配置则一律拒绝,防止控制器被当成任意 URL 的探测器;私有 http(s) 仓库用 `--git-token-file`。
-- **`/workflows/:namespace/:name`(任务详情)**:状态条(Pending → Running → Success/Failed)、失败原因、基本信息、按时间排序的 K8s Events 时间线、按步骤(checkout / prepare / build / release)分页的实时日志(`executorPodName` 出现后才加载,未开始的步骤显示"尚未开始";任务结束后停止 follow)。
-  与设计文档的差异:路径多了 namespace,因为 `ReleaseTask` 是命名空间级资源。
-- 侧边栏底部的 "Create" 按钮也隐藏了(无官方开关,用 `MutationObserver` 只隐藏侧边栏抽屉里的那个,原生详情页里的按钮不受影响)。
-- 登录:默认粘贴 ServiceAccount token;接入 Google 账号登录见 [docs/google-auth.md](docs/google-auth.md)(`deploy/headlamp-google-oidc`);沿用 Zadig 账号(迁到 Dex + MySQL,管理员用 `dex-users` 命令行管理)见 [docs/zadig-accounts-dex.md](docs/zadig-accounts-dex.md)(`cmd/zadig-export`、`cmd/dex-users`、`deploy/dex`、`deploy/headlamp-dex`)。
-- 开发:`cd headlamp-plugin/okdev-console && npm install && npm run build|tsc|lint`。
-- 部署到集群:`scripts/deploy-headlamp.sh`(构建 → ConfigMap → 集群内 Headlamp),`kubectl -n okdev-system port-forward svc/headlamp 4466:80`,用 ServiceAccount token 登录。
-- 端到端脚本 `headlamp-plugin/e2e/`(Playwright,`TOKEN_FILE` 指向 token 文件):`node services.js`、`node workflows.js`(单服务,选已有分支)、`node multi-service.js`(多服务)。
-
-插件在 myk8s 集群上用浏览器实测通过(Headlamp 镜像 `ghcr.io/headlamp-k8s/headlamp:latest`,2026-10-25 拉取;k8s v1.37.1):
-- 服务页:切到 dev,列出 Deployment / StatefulSet / CronJob / Job 四类共 4 行,三类服务点击后分别落在对应原生路由。
-- 工作流页:选 hello 后仓库、ref、GitOps 目录由注解预填;运行后自动跳转详情页,状态条依次经过 Pending → Running → Success;Events 显示 JobCreated / Running / Succeeded;构建中能看到 kaniko 实时日志,结束后 release 日志显示 `pushed … to main`,GitOps 仓库确实多了对应 commit。
-- 失败路径:ref 填 `nope`,详情页显示 Failed 和 `container checkout exited with code 128: fatal: invalid reference: nope`。
-- 未验证:非 cluster-admin 用户(只绑 `okdev-releasetask-editor`)的权限表现、多集群、Headlamp 桌面版、窄屏布局。
+单元测试(`go test ./cmd/... ./internal/...`):状态映射、提交流程、不重复提交的各种情形、deployer 不可达、网关不泄露构建脚本、分支列表缓存。
+**沙箱端到端**(myk8s 集群 + deployer + Argo CD,Dex 登录,Playwright):
+- Environment 页显示 deployer 里的服务和 Argo CD 状态,服务名跳到 `…/deployments/dev3-env-api/api`;
+- Workflow 页多选 `api` 和 `api-b`,下拉里是真实仓库的分支和 Tag,Run 后两个任务都 Success,集群里 `dev5-env-api`(2 副本)和 `dev5-env-api-b` 起来了;
+- 单服务运行进详情页:状态 Running→Success,Events(Submitted/Running/Succeeded),构建日志是 kaniko 的输出;
+- 不存在的分支(用 kubectl 创建):任务 Failed,message 是 `build failed at step "checkout" (exit code 128) — fatal: couldn't find remote ref …`;
+- 运行进行中删除控制器 Pod:任务继续,最终 Success,deployer 里没有多出运行;
+- 权限:alice(已授权)能读接口、能在 `okdev-releases` 创建任务、不能写 status;bob(只登录)全部被拒。
+**没验证的**:ReleaseTask 因 deployer 超时失败的路径(只有 deployer 单测);Argo CD 在几千个 Application 下的表现;
+deployer 开启 `API_TOKEN` 后控制器带令牌访问(代码有,没实测);多副本控制器;窄屏下的布局。

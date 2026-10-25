@@ -57,7 +57,7 @@ overlay 用 PKCE、自动跳转 Google(`-oidc-auto-login`),Secret 通过环境�
 kubectl apply -k config            # 包含 ClusterRole okdev-developer
 kubectl apply -f deploy/headlamp-google-oidc/developers-example.yaml   # 改成真实邮箱
 ```
-`okdev-developer`(列环境、进终端、创建发布任务、读分支列表)+ 内置 `view`(只读工作负载/Pod/日志/事件,不含 Secret)。
+需要绑的角色见 README 的“权限”一节:`okdev-developer`、`okdev-release-submitter`、`okdev-console-reader`,再加内置 `view`(只读工作负载/Pod/日志/事件,不含 Secret)。
 **Google 的 ID Token 不带群组**,只能按邮箱逐个绑定。要按组授权:前面接 Dex(Google connector,可读 Workspace 群组),或用脚本把群组成员同步成 RoleBinding。
 
 ## 已知限制

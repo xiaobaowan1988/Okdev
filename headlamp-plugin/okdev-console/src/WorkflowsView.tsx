@@ -2,15 +2,15 @@ import { Link, SectionBox, Table } from '@kinvolk/headlamp-plugin/lib/CommonComp
 import React from 'react';
 import { useEnvironment } from './EnvironmentSelect';
 import { PhaseChip } from './PhaseChip';
-import { ReleaseTask } from './ReleaseTask';
+import { RELEASE_NAMESPACE, ReleaseTask } from './ReleaseTask';
 import { RunForm } from './RunForm';
 
-// 工作流:选服务 / 环境 / Git 分支或 Tag,点击运行 -> 创建 ReleaseTask -> 跳转详情页。
+// 工作流:选环境 / 服务 / 分支或 Tag,点击运行 -> 创建 ReleaseTask -> 由 deployer 构建并部署。
 export function WorkflowsView() {
   const [env, setEnv] = useEnvironment();
-  const [tasks] = ReleaseTask.useList({ namespace: env });
+  const [tasks] = ReleaseTask.useList({ namespace: RELEASE_NAMESPACE });
   const sorted = (tasks || [])
-    .slice()
+    .filter(t => !env || t.spec?.environment === env)
     .sort((a, b) =>
       String(b.metadata.creationTimestamp).localeCompare(String(a.metadata.creationTimestamp))
     );
@@ -31,14 +31,14 @@ export function WorkflowsView() {
                 <Link kubeObject={row.original}>{row.original.metadata.name}</Link>
               ),
             },
-            { header: 'Service', accessorFn: (t: ReleaseTask) => t.spec?.service?.name },
-            { header: 'Kind', accessorFn: (t: ReleaseTask) => t.spec?.service?.kind },
-            { header: 'Git Ref', accessorFn: (t: ReleaseTask) => t.spec?.git?.ref },
+            { header: 'Service', accessorFn: (t: ReleaseTask) => t.spec?.service },
+            { header: 'Git Ref', accessorFn: (t: ReleaseTask) => t.spec?.ref || '(default)' },
             {
               header: 'Status',
               accessorFn: (t: ReleaseTask) => t.phase,
               Cell: ({ row }: any) => <PhaseChip phase={row.original.phase} />,
             },
+            { header: 'Stage', accessorFn: (t: ReleaseTask) => t.status.stage || '' },
             { header: 'Age', accessorFn: (t: ReleaseTask) => t.getAge() },
           ]}
           emptyMessage="No release tasks yet"

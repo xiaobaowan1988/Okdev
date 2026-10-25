@@ -1,30 +1,17 @@
-import { K8s } from '@kinvolk/headlamp-plugin/lib';
-import { LogViewer } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
 import {
   BackLink,
-  Link,
   Loader,
+  LogViewer,
   NameValueTable,
   SectionBox,
 } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
 import Event from '@kinvolk/headlamp-plugin/lib/k8s/event';
-import {
-  Alert,
-  LinearProgress,
-  Step,
-  StepLabel,
-  Stepper,
-  Tab,
-  Tabs,
-  Typography,
-} from '@mui/material';
+import { Alert, LinearProgress, Step, StepLabel, Stepper, Typography } from '@mui/material';
 import React from 'react';
 import { useParams } from 'react-router-dom';
+import { getText } from './gateway';
 import { PhaseChip } from './PhaseChip';
 import { Phase, ReleaseTask } from './ReleaseTask';
-
-// 与控制器编排的 Pod 容器一一对应
-const STEPS = ['checkout', 'prepare', 'build', 'release'];
 
 export function TaskDetail() {
   const { namespace, name } = useParams<{ namespace: string; name: string }>();
@@ -53,34 +40,23 @@ export function TaskDetail() {
         <NameValueTable
           rows={[
             { name: 'Status', value: <PhaseChip phase={task.phase} /> },
-            { name: 'Service', value: `${task.spec.service.name} (${task.spec.service.kind})` },
+            { name: 'Stage', value: task.status.stage || '-' },
+            { name: 'Service', value: task.spec.service },
+            { name: 'Builder', value: task.spec.builder },
             { name: 'Environment', value: task.spec.environment },
-            { name: 'Git', value: `${task.spec.git.repo} @ ${task.spec.git.ref}` },
-            ...(task.spec.gitops
-              ? [
-                  {
-                    name: 'GitOps',
-                    value: `${task.spec.gitops.repo} ${task.spec.gitops.branch || ''} ${
-                      task.spec.gitops.path || ''
-                    }`,
-                  },
-                ]
-              : []),
+            { name: 'Git ref', value: task.spec.ref || '(builder default)' },
+            { name: 'Image', value: task.status.image || '-' },
+            { name: 'Run', value: task.status.runID ? `#${task.status.runID}` : '-' },
             { name: 'Started', value: task.status.startTime || '-' },
             { name: 'Finished', value: task.status.completionTime || '-' },
-            {
-              name: 'Executor pod',
-              value: task.status.executorPodName || '-',
-              hide: !task.status.executorPodName,
-            },
           ]}
         />
       </SectionBox>
       <SectionBox title="Events">
         <TaskEvents task={task} />
       </SectionBox>
-      <SectionBox title="Logs">
-        <TaskLogs task={task} />
+      <SectionBox title="Build log">
+        <TaskLog task={task} />
       </SectionBox>
     </>
   );
@@ -138,63 +114,41 @@ function TaskEvents({ task }: { task: ReleaseTask }) {
   );
 }
 
-function TaskLogs({ task }: { task: ReleaseTask }) {
-  const podName = task.status.executorPodName;
-  const ns = task.metadata.namespace;
-  const [pod] = K8s.ResourceClasses.Pod.useGet(podName || '', ns);
-  const [step, setStep] = React.useState('release');
-  const [logs, setLogs] = React.useState<string[]>([]);
-  const started = pod ? containerStarted(pod, step) : false;
+// 构建日志来自 deployer:构建中是构建 Pod 的实时日志,结束后是保存下来的完整日志。
+// 任务没结束时每 3 秒刷新一次;结束后再取一次最终日志。
+function TaskLog({ task }: { task: ReleaseTask }) {
+  const runID = task.status.runID;
+  const done = task.phase === 'Success' || task.phase === 'Failed';
+  const [lines, setLines] = React.useState<string[]>([]);
+  const [error, setError] = React.useState('');
 
-  // 未出现 ExecutorPodName 前没有日志可看;出现后按所选步骤跟随输出
   React.useEffect(() => {
-    setLogs([]);
-    if (!pod || !started) return;
-    const cancel = pod.getLogs(step, ({ logs }: { logs: string[] }) => setLogs(logs), {
-      tailLines: 1000,
-      follow: !task.phase.match(/Success|Failed/),
-      showTimestamps: false,
-    } as any);
-    return () => cancel && cancel();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pod?.metadata.uid, step, started, task.phase]);
+    if (!runID) return;
+    let live = true;
+    const load = () =>
+      getText(`/runs/${runID}/log`)
+        .then(t => live && (setLines(t.split('\n')), setError('')))
+        .catch((e: any) => live && setError(e?.message || String(e)));
+    load();
+    const t = done ? undefined : setInterval(load, 3000);
+    return () => {
+      live = false;
+      if (t) clearInterval(t);
+    };
+  }, [runID, done]);
 
-  if (!podName)
-    return (
-      <Typography color="text.secondary">
-        Waiting for the controller to create the executor pod…
-      </Typography>
-    );
-  if (!pod) return <Loader title="Loading executor pod" />;
+  if (!runID)
+    return <Typography color="text.secondary">Waiting for the run to be submitted…</Typography>;
   return (
     <>
-      <Typography variant="body2" sx={{ mb: 1 }}>
-        Executor pod: <Link kubeObject={pod}>{podName}</Link>
-      </Typography>
-      <Tabs value={step} onChange={(_, v) => setStep(v)}>
-        {STEPS.map(s => (
-          <Tab key={s} value={s} label={s} data-testid={`tab-${s}`} />
-        ))}
-      </Tabs>
+      {error && (
+        <Alert severity="warning" sx={{ mb: 1 }}>
+          Could not load the log: {error}
+        </Alert>
+      )}
       <div style={{ height: 360 }} data-testid="log-view">
-        {started ? (
-          <LogViewer logs={logs} open onClose={() => {}} noDialog title={step} />
-        ) : (
-          <Typography color="text.secondary" sx={{ p: 2 }}>
-            This step has not started yet
-          </Typography>
-        )}
+        <LogViewer logs={lines} open onClose={() => {}} noDialog title={`run ${runID}`} />
       </div>
     </>
   );
-}
-
-// init 容器和主容器的状态分开存放;只有已运行或已结束的容器才有日志
-function containerStarted(pod: any, name: string): boolean {
-  const statuses = [
-    ...(pod.jsonData.status?.initContainerStatuses || []),
-    ...(pod.jsonData.status?.containerStatuses || []),
-  ];
-  const cs = statuses.find((c: any) => c.name === name);
-  return !!cs && !!(cs.state?.running || cs.state?.terminated);
 }

@@ -21,104 +21,74 @@ import {
 import React from 'react';
 import { useHistory } from 'react-router-dom';
 import { EnvironmentSelect } from './EnvironmentSelect';
-import { useGitRefs } from './gitRefs';
-import {
-  ANNOTATION_GIT_REF,
-  ANNOTATION_GIT_REPO,
-  ANNOTATION_GITOPS_BRANCH,
-  ANNOTATION_GITOPS_PATH,
-  ANNOTATION_GITOPS_REPO,
-} from './ReleaseTask';
-import { ServiceItem, useServices } from './services';
+import { Builder, Refs, useGateway } from './gateway';
+import { RELEASE_NAMESPACE } from './ReleaseTask';
 
-// 每个被选中的服务一行。仓库和 GitOps 位置由平台通过工作负载注解固定,研发只选分支/Tag。
-interface Platform {
-  repo: string;
-  ref: string; // 注解里的默认分支,可空
-  gitopsRepo: string;
-  gitopsBranch: string;
-  gitopsPath: string;
+// 每个被选中的服务一行:选构建器(一个服务可能有多个)和分支/Tag。仓库由 deployer 里的构建器决定,只读展示。
+interface Row {
+  builder: string;
+  ref: string;
 }
 
-function platformFor(s: ServiceItem): Platform {
-  const a = s.obj.metadata.annotations || {};
-  return {
-    repo: a[ANNOTATION_GIT_REPO] || '',
-    ref: a[ANNOTATION_GIT_REF] || '',
-    gitopsRepo: a[ANNOTATION_GITOPS_REPO] || '',
-    gitopsBranch: a[ANNOTATION_GITOPS_BRANCH] || '',
-    gitopsPath: a[ANNOTATION_GITOPS_PATH] || '',
-  };
-}
-
-function buildTask(env: string, s: ServiceItem, ref: string) {
-  const p = platformFor(s);
-  const spec: any = {
-    service: { name: s.name, kind: s.kind },
-    environment: env,
-    git: { repo: p.repo, ref },
-  };
-  if (p.gitopsRepo) {
-    spec.gitops = {
-      repo: p.gitopsRepo,
-      ...(p.gitopsBranch && { branch: p.gitopsBranch }),
-      ...(p.gitopsPath && { path: p.gitopsPath }),
-    };
-  }
-  return {
+async function createTask(env: string, service: string, builder: string, ref: string) {
+  const body = {
     apiVersion: 'ci.okdev.io/v1',
     kind: 'ReleaseTask',
-    metadata: { generateName: `${s.name}-`.toLowerCase(), namespace: env },
-    spec,
+    metadata: { generateName: `${service}-${env}-`.toLowerCase(), namespace: RELEASE_NAMESPACE },
+    spec: { service, builder, environment: env, ...(ref && { ref }) },
   };
+  const res: any = await ApiProxy.post(
+    `/apis/ci.okdev.io/v1/namespaces/${RELEASE_NAMESPACE}/releasetasks`,
+    body,
+    true,
+    { cluster: getCluster() || undefined }
+  );
+  return res.metadata.name as string;
 }
 
 // 运行工作流:一次选多个服务,每个服务各选分支;每个服务创建一个 ReleaseTask,互不影响。
-export function RunForm(props: { env: string; onEnvChange: (ns: string) => void }) {
+export function RunForm(props: { env: string; onEnvChange: (env: string) => void }) {
   const { env, onEnvChange } = props;
   const history = useHistory();
-  const { items } = useServices(env);
-  const [selected, setSelected] = React.useState<ServiceItem[]>([]);
-  const [refs, setRefs] = React.useState<Record<string, string>>({}); // 服务 key -> 所选分支/Tag
+  const { data: builders } = useGateway<Builder[]>('/builders');
+  const services = React.useMemo(
+    () => Array.from(new Set((builders || []).map(b => b.service))).sort(),
+    [builders]
+  );
+  const buildersOf = (service: string) => (builders || []).filter(b => b.service === service);
+
+  const [selected, setSelected] = React.useState<string[]>([]);
+  const [rows, setRows] = React.useState<Record<string, Row>>({});
   const [submitting, setSubmitting] = React.useState(false);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [created, setCreated] = React.useState<{ name: string; service: string }[]>([]);
 
-  // 换环境后,之前选的服务不再属于该环境
-  React.useEffect(() => {
-    setSelected([]);
-    setRefs({});
-    setErrors({});
-    setCreated([]);
-  }, [env]);
-
-  const choose = (list: ServiceItem[]) => {
+  const choose = (list: string[]) => {
     setSelected(list);
-    setRefs(prev =>
-      Object.fromEntries(Object.entries(prev).filter(([k]) => list.some(s => s.key === k)))
-    );
+    setRows(prev => {
+      const next: Record<string, Row> = {};
+      list.forEach(s => (next[s] = prev[s] || { builder: buildersOf(s)[0]?.name || '', ref: '' }));
+      return next;
+    });
   };
+  const patch = (service: string, p: Partial<Row>) =>
+    setRows(prev => ({ ...prev, [service]: { ...prev[service], ...p } }));
 
-  const valid = selected.length > 0 && selected.every(s => !!platformFor(s).repo && !!refs[s.key]);
+  const valid =
+    !!env && selected.length > 0 && selected.every(s => !!rows[s]?.builder && !!rows[s]?.ref);
 
   const submit = async () => {
     setSubmitting(true);
     setErrors({});
-    const ok: { name: string; service: string; namespace: string }[] = [];
+    const ok: { name: string; service: string }[] = [];
     const failed: Record<string, string> = {};
     // 并发创建;某个服务失败不影响其他服务
     await Promise.all(
       selected.map(async s => {
         try {
-          const res: any = await ApiProxy.post(
-            `/apis/ci.okdev.io/v1/namespaces/${env}/releasetasks`,
-            buildTask(env, s, refs[s.key]),
-            true,
-            { cluster: getCluster() || undefined }
-          );
-          ok.push({ name: res.metadata.name, namespace: res.metadata.namespace, service: s.name });
+          ok.push({ name: await createTask(env, s, rows[s].builder, rows[s].ref), service: s });
         } catch (e: any) {
-          failed[s.key] = e?.message || String(e);
+          failed[s] = e?.message || String(e);
         }
       })
     );
@@ -128,7 +98,7 @@ export function RunForm(props: { env: string; onEnvChange: (ns: string) => void 
       // 只发布一个服务:直接进入详情页
       history.push(
         Router.createRouteURL('okdev-workflow-detail', {
-          namespace: ok[0].namespace,
+          namespace: RELEASE_NAMESPACE,
           name: ok[0].name,
         })
       );
@@ -137,26 +107,31 @@ export function RunForm(props: { env: string; onEnvChange: (ns: string) => void 
     // 多个服务:成功的从表单移走,失败的留下重试;任务列表会自动出现新任务
     setCreated(ok);
     setErrors(failed);
-    setSelected(prev => prev.filter(s => failed[s.key]));
+    setSelected(prev => prev.filter(s => failed[s]));
   };
 
   return (
     <Paper variant="outlined" sx={{ p: 2 }}>
       <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: '1fr 2fr' } }}>
-        <EnvironmentSelect value={env} onChange={onEnvChange} label="Target environment" />
+        <EnvironmentSelect
+          value={env}
+          onChange={e => {
+            onEnvChange(e);
+            setCreated([]);
+          }}
+          label="Target environment"
+        />
         <Autocomplete
           multiple
           disableCloseOnSelect
           size="small"
-          options={items}
+          options={services}
           value={selected}
           onChange={(_, v) => choose(v)}
-          getOptionLabel={s => `${s.name} (${s.kind})`}
-          isOptionEqualToValue={(a, b) => a.key === b.key}
           renderOption={(p, s, { selected: sel }) => (
-            <li {...p} key={s.key}>
+            <li {...p} key={s}>
               <Checkbox size="small" checked={sel} sx={{ mr: 1 }} />
-              {s.name} ({s.kind})
+              {s}
             </li>
           )}
           renderInput={params => (
@@ -167,11 +142,12 @@ export function RunForm(props: { env: string; onEnvChange: (ns: string) => void 
 
       {selected.map(s => (
         <ServiceRow
-          key={s.key}
+          key={s}
           service={s}
-          value={refs[s.key] || ''}
-          onChange={v => setRefs(prev => ({ ...prev, [s.key]: v }))}
-          error={errors[s.key]}
+          builders={buildersOf(s)}
+          row={rows[s] || { builder: '', ref: '' }}
+          onChange={p => patch(s, p)}
+          error={errors[s]}
         />
       ))}
 
@@ -180,7 +156,10 @@ export function RunForm(props: { env: string; onEnvChange: (ns: string) => void 
           Created {created.length} task(s):
           {created.map(c => (
             <span key={c.name} style={{ marginLeft: 8 }}>
-              <Link routeName="okdev-workflow-detail" params={{ namespace: env, name: c.name }}>
+              <Link
+                routeName="okdev-workflow-detail"
+                params={{ namespace: RELEASE_NAMESPACE, name: c.name }}
+              >
                 {c.service} ({c.name})
               </Link>
             </span>
@@ -207,72 +186,83 @@ export function RunForm(props: { env: string; onEnvChange: (ns: string) => void 
 }
 
 function ServiceRow(props: {
-  service: ServiceItem;
-  value: string;
-  onChange: (ref: string) => void;
+  service: string;
+  builders: Builder[];
+  row: Row;
+  onChange: (p: Partial<Row>) => void;
   error?: string;
 }) {
-  const { service: s, value, onChange, error } = props;
-  const p = platformFor(s);
-  const { refs, error: refsError, loading } = useGitRefs(p.repo);
+  const { service, builders, row, onChange, error } = props;
+  const builder = builders.find(b => b.name === row.builder);
+  const {
+    data: refs,
+    error: refsError,
+    loading,
+  } = useGateway<Refs>(builder ? `/refs?builder=${encodeURIComponent(builder.name)}` : '');
 
-  // 候选加载完成后选默认值:注解里的默认分支 > 仓库默认分支 > 第一个分支
+  // 候选加载完成后选默认值:构建器配置的默认分支 > 仓库默认分支 > 第一个分支
   React.useEffect(() => {
-    if (!refs || value) return;
+    if (!refs || row.ref) return;
     const all = [...refs.branches, ...refs.tags];
-    const pick = [p.ref, refs.default, refs.branches[0]].find(r => r && all.includes(r));
-    if (pick) onChange(pick);
+    const pick = [refs.builder_ref, refs.default, refs.branches[0]].find(r => r && all.includes(r));
+    if (pick) onChange({ ref: pick });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refs]);
 
   return (
     <Box
-      data-testid={`row-${s.name}`}
+      data-testid={`row-${service}`}
       sx={{ mt: 2, p: 1.5, border: 1, borderColor: 'divider', borderRadius: 1 }}
     >
       <Typography variant="subtitle2" sx={{ mb: 1 }}>
-        {s.name}{' '}
-        <Typography component="span" variant="caption" color="text.secondary">
-          {s.kind}
-        </Typography>
+        {service}
       </Typography>
-      {!p.repo ? (
+      {builders.length === 0 ? (
         <Alert severity="warning">
-          This service has no Git repository configured. Ask a platform admin to add the annotation{' '}
-          {ANNOTATION_GIT_REPO} to the workload.
+          This service has no builder in deployer. Ask a platform admin to register one.
         </Alert>
       ) : (
         <Box
           sx={{
             display: 'grid',
             gap: 2,
-            gridTemplateColumns: { xs: '1fr', md: '2fr 1fr' },
-            alignItems: 'center',
+            gridTemplateColumns: { xs: '1fr', md: '1fr 1fr 1fr' },
+            alignItems: 'start',
           }}
         >
+          <FormControl size="small" disabled={builders.length === 1}>
+            <InputLabel id={`builder-label-${service}`}>Builder</InputLabel>
+            <Select
+              labelId={`builder-label-${service}`}
+              label="Builder"
+              value={row.builder}
+              onChange={e => onChange({ builder: e.target.value as string, ref: '' })}
+              data-testid={`builder-${service}`}
+            >
+              {builders.map(b => (
+                <MenuItem key={b.name} value={b.name}>
+                  {b.name}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
           <Typography
             variant="body2"
             color="text.secondary"
-            data-testid={`repo-${s.name}`}
-            sx={{ wordBreak: 'break-all' }}
+            data-testid={`repo-${service}`}
+            sx={{ wordBreak: 'break-all', pt: 0.5 }}
           >
-            Repository: {p.repo}
-            {p.gitopsRepo && (
-              <>
-                <br />
-                Deploy config: {p.gitopsRepo} {p.gitopsBranch} {p.gitopsPath}
-              </>
-            )}
+            Repository: {builder?.repo_url}
           </Typography>
           <FormControl size="small" error={!!refsError}>
-            <InputLabel id={`ref-label-${s.name}`}>Branch / Tag</InputLabel>
+            <InputLabel id={`ref-label-${service}`}>Branch / Tag</InputLabel>
             <Select
-              labelId={`ref-label-${s.name}`}
+              labelId={`ref-label-${service}`}
               label="Branch / Tag"
-              value={value}
+              value={row.ref}
               disabled={loading || !refs}
-              onChange={e => onChange(e.target.value as string)}
-              data-testid={`ref-${s.name}`}
+              onChange={e => onChange({ ref: e.target.value as string })}
+              data-testid={`ref-${service}`}
               endAdornment={loading ? <CircularProgress size={16} sx={{ mr: 3 }} /> : undefined}
             >
               {refs && refs.branches.length > 0 && <ListSubheader>Branches</ListSubheader>}

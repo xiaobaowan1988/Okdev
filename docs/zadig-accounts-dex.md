@@ -62,7 +62,7 @@ scripts/deploy-dex.sh
      正常的密钥轮换不受影响(旧公钥会继续发布一段时间)。
 2. **Headlamp**:改 `deploy/headlamp-dex/kustomization.yaml` 里的 issuer、callback-url,把 Dex 的 CA 放进 ConfigMap `dex-ca`,
    `HEADLAMP_OVERLAY=deploy/headlamp-dex scripts/deploy-headlamp.sh`。
-3. **授权**:登录只证明身份,权限由 RBAC 决定。K8s 用户名是 `dex:` + **账号名**(例如 `dex:alice`),见 `deploy/dex-sandbox/developers.yaml`。
+3. **授权**:登录只证明身份,权限由 RBAC 决定。K8s 用户名是 `dex:` + **账号名**(例如 `dex:alice`);需要绑哪些角色见 README 的“权限”一节,示例见 `deploy/dex-sandbox/developers.yaml`。
 
 ## 日常管理:`dex-users`
 ```bash
