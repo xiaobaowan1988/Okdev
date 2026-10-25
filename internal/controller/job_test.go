@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1 "github.com/xiaobaowan1988/okdev/internal/api/v1"
@@ -21,7 +22,7 @@ func sampleTask() *v1.ReleaseTask {
 }
 
 func TestBuildJob(t *testing.T) {
-	cfg := Config{ExecutorImage: "exec:1", GitImage: "git:1", DefaultTimeout: time.Minute}
+	cfg := Config{ExecutorImage: "exec:1", KanikoImage: "kaniko:1", DefaultTimeout: time.Minute}
 	j := BuildJob(sampleTask(), cfg)
 
 	if j.Namespace != "dev" || j.Name != "rt-t1" {
@@ -34,11 +35,43 @@ func TestBuildJob(t *testing.T) {
 		t.Fatal("job must not retry and must use default timeout")
 	}
 	pod := j.Spec.Template.Spec
-	if pod.Containers[0].Image != "exec:1" || pod.InitContainers[0].Image != "git:1" {
+	var steps []string
+	for _, c := range pod.InitContainers {
+		steps = append(steps, c.Name)
+	}
+	if len(steps) != 3 || steps[0] != "checkout" || steps[1] != "prepare" || steps[2] != "build" {
+		t.Fatalf("unexpected init steps %v", steps)
+	}
+	if pod.InitContainers[2].Image != "kaniko:1" || pod.Containers[0].Name != "release" || pod.Containers[0].Image != "exec:1" {
 		t.Fatal("wrong images")
+	}
+	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+		t.Fatal("user build code must not get a service account token")
 	}
 	if j.Spec.Template.Annotations[AnnotationTask] != "t1" || j.Spec.Template.Labels[LabelManagedBy] != ManagedByValue {
 		t.Fatal("pod template must carry task annotation and managed-by label")
+	}
+}
+
+func TestBuildJobExtraEnvCAAndSecret(t *testing.T) {
+	cfg := Config{ExecutorImage: "exec:1", KanikoImage: "kaniko:1", DefaultTimeout: time.Minute,
+		ExtraEnv:    []corev1.EnvVar{{Name: "REGISTRY_PUSH", Value: "reg:5000"}},
+		CAConfigMap: "build-ca", GitOpsSecret: "gitops-token"}
+	pod := BuildJob(sampleTask(), cfg).Spec.Template.Spec
+	for _, c := range append(append([]corev1.Container{}, pod.InitContainers[:2]...), pod.Containers...) {
+		found := false
+		for _, e := range c.Env {
+			found = found || (e.Name == "REGISTRY_PUSH" && e.Value == "reg:5000")
+		}
+		if !found {
+			t.Fatalf("%s missing extra env", c.Name)
+		}
+	}
+	if len(pod.Volumes) != 3 {
+		t.Fatalf("want workspace+ca+gitops volumes, got %d", len(pod.Volumes))
+	}
+	if len(pod.InitContainers[2].VolumeMounts) != 2 {
+		t.Fatal("kaniko must get the CA mount")
 	}
 }
 
@@ -47,18 +80,21 @@ func TestBuildJobOverridesAndInjectionSafety(t *testing.T) {
 	task.Spec.TimeoutSeconds = 120
 	task.Spec.Executor = &v1.ExecutorSpec{Image: "custom:2", Command: []string{"/run"}}
 	task.Spec.Git.Ref = `main; rm -rf /`
-	j := BuildJob(task, Config{ExecutorImage: "exec:1", GitImage: "git:1", DefaultTimeout: time.Minute})
+	j := BuildJob(task, Config{ExecutorImage: "exec:1", KanikoImage: "kaniko:1", DefaultTimeout: time.Minute})
 
 	if *j.Spec.ActiveDeadlineSeconds != 120 {
 		t.Fatal("spec timeout must win")
 	}
 	c := j.Spec.Template.Spec.Containers[0]
-	if c.Image != "custom:2" || c.Command[0] != "/run" {
+	if c.Image != "custom:2" || c.Command[0] != "/run" || c.Args != nil {
 		t.Fatal("executor override ignored")
 	}
-	script := j.Spec.Template.Spec.InitContainers[0].Command[2]
-	if contains(script, "rm -rf") {
-		t.Fatal("user input leaked into shell script")
+	for _, ic := range j.Spec.Template.Spec.InitContainers {
+		for _, a := range append(append([]string{}, ic.Command...), ic.Args...) {
+			if contains(a, "rm -rf") {
+				t.Fatal("user input leaked into command line")
+			}
+		}
 	}
 	var ref string
 	for _, e := range c.Env {

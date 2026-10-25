@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,8 +36,17 @@ func main() {
 		cfg         controller.Config
 	)
 	flag.StringVar(&cfg.ExecutorImage, "executor-image", "", "默认执行器镜像(必填)")
-	flag.StringVar(&cfg.GitImage, "git-image", "alpine/git:latest", "克隆代码用的镜像")
-	flag.StringVar(&cfg.ServiceAccount, "executor-service-account", "", "执行 Pod 的 ServiceAccount")
+	flag.StringVar(&cfg.KanikoImage, "kaniko-image", "gcr.io/kaniko-project/executor:v1.23.2-debug", "构建镜像用的 kaniko(需带 shell 的 debug 版)")
+	flag.StringVar(&cfg.CAConfigMap, "ca-configmap", "", "含 build-ca.crt 的 ConfigMap(可选)")
+	flag.StringVar(&cfg.GitOpsSecret, "gitops-secret", "", "含 token 的 Secret,用于推送 GitOps 仓库(可选)")
+	flag.Func("executor-env", "传给执行器的环境变量 KEY=VALUE,可重复,如 REGISTRY_PUSH=...", func(v string) error {
+		k, val, ok := strings.Cut(v, "=")
+		if !ok || k == "" {
+			return fmt.Errorf("want KEY=VALUE, got %q", v)
+		}
+		cfg.ExtraEnv = append(cfg.ExtraEnv, corev1.EnvVar{Name: k, Value: val})
+		return nil
+	})
 	flag.DurationVar(&cfg.DefaultTimeout, "default-timeout", 30*time.Minute, "任务默认超时")
 	flag.Parse()
 

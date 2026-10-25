@@ -1,0 +1,23 @@
+# 沙箱单节点集群(myk8s)的覆盖:镜像用 scripts/build-*.sh 导入的本地镜像,仓库用 myk8s 的集群内 registry。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../config
+patches:
+  - target: {kind: Deployment, name: okdev-controller}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: okdev-controller:dev
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+      - op: replace
+        path: /spec/template/spec/containers/0/args
+        value:
+          - --executor-image=okdev-executor:dev
+          - --ca-configmap=build-ca
+          - --executor-env=REGISTRY_PUSH=registry.deployer-build.svc:5000
+          - --executor-env=REGISTRY_INSECURE=true
+          - --executor-env=REGISTRY_PULL=localhost:30500
+          - --leader-elect

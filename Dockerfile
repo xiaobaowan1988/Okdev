@@ -1,10 +1,4 @@
-FROM golang:1.24 AS build
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -o /controller ./cmd/controller
-
+# 二进制由 scripts/build-controller.sh 在宿主机编译(沙箱容器内无法 go mod download)
 FROM gcr.io/distroless/static:nonroot
-COPY --from=build /controller /controller
+COPY controller /controller
 ENTRYPOINT ["/controller"]

@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -87,7 +88,7 @@ func failureMessage(c *batchv1.JobCondition, pod *corev1.Pod) string {
 		statuses := append(append([]corev1.ContainerStatus(nil), pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
 		for _, cs := range statuses {
 			if t := cs.State.Terminated; t != nil && t.ExitCode != 0 {
-				return fmt.Sprintf("container %s exited with code %d: %s", cs.Name, t.ExitCode, firstNonEmpty(t.Message, t.Reason))
+				return fmt.Sprintf("container %s exited with code %d: %s", cs.Name, t.ExitCode, firstNonEmpty(lastLine(t.Message), t.Reason))
 			}
 			if w := cs.State.Waiting; w != nil && (w.Reason == "ImagePullBackOff" || w.Reason == "ErrImagePull") {
 				return fmt.Sprintf("container %s: %s: %s", cs.Name, w.Reason, w.Message)
@@ -104,4 +105,10 @@ func firstNonEmpty(ss ...string) string {
 		}
 	}
 	return ""
+}
+
+// lastLine 取终止消息(日志末尾)里最后一个非空行。
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
 }

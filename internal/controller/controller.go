@@ -169,7 +169,32 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 		return err
 	}
 
-	if job == nil && task.Status.Phase != "" && task.Status.JobName != "" {
+	if job == nil && task.Status.JobName == "" {
+		// 缓存里的任务可能落后于我们自己刚写的 status:建 Job 之前读一次最新的,避免 Job 被删后重复创建。
+		live, err := c.dyn.Resource(v1.GVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if raw, task, err = decodeLive(live); err != nil {
+			return err
+		}
+	}
+
+	if job == nil && task.Status.JobName != "" {
+		// 缓存可能还没看到刚建的 Job:向 API server 确认后才算丢失。
+		live, err := c.kube.BatchV1().Jobs(ns).Get(ctx, task.Status.JobName, metav1.GetOptions{})
+		switch {
+		case err == nil:
+			job = live
+		case !apierrors.IsNotFound(err):
+			return err
+		}
+	}
+
+	if job == nil && task.Status.JobName != "" {
 		// 已经创建过 Job 但现在找不到(被人删了),不重建以免重复发布。
 		c.recorder.Event(raw, corev1.EventTypeWarning, "JobLost", "executor job disappeared")
 		st := task.Status
@@ -228,6 +253,11 @@ func (c *Controller) writeStatus(ctx context.Context, raw *unstructured.Unstruct
 		return nil
 	}
 	return err
+}
+
+func decodeLive(u *unstructured.Unstructured) (*unstructured.Unstructured, *v1.ReleaseTask, error) {
+	t, err := v1.FromUnstructured(u)
+	return u, t, err
 }
 
 func ptr[T any](v T) *T { return &v }

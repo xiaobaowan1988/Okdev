@@ -49,7 +49,7 @@ func newEnv(t *testing.T, tasks ...*v1.ReleaseTask) *env {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	c := New(Config{ExecutorImage: "exec:1", GitImage: "git:1", DefaultTimeout: time.Minute},
+	c := New(Config{ExecutorImage: "exec:1", KanikoImage: "kaniko:1", DefaultTimeout: time.Minute},
 		dyn, kube, record.NewFakeRecorder(100), "", 0)
 	c.now = func() metav1.Time { return now }
 	for _, s := range c.startFns {
@@ -164,6 +164,13 @@ func TestReconcileInvalidSpecFails(t *testing.T) {
 func TestReconcileJobDeletedMidFlightFails(t *testing.T) {
 	e := newEnv(t, sampleTask())
 	e.reconcile(t, "t1", v1.PhasePending)
+	// 等 informer 观察到 Job 之后再删,否则 fake 客户端可能丢掉还没建立 watch 时的删除事件
+	for i := 0; i < 200; i++ {
+		if _, err := e.c.jobs.Jobs("dev").Get("rt-t1"); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	if err := e.kube.BatchV1().Jobs("dev").Delete(e.ctx, "rt-t1", metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
