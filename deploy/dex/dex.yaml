@@ -1,28 +1,7 @@
-# Dex:把 Zadig 账号导出成的静态账号,以标准 OIDC 提供给 Headlamp 和 kube-apiserver。
-# 配置(含密码哈希)在 Secret dex-config,由 scripts/deploy-dex.sh 生成,不入库。
-# TLS 证书在 Secret dex-tls(kube-apiserver 要求 issuer 是 https)。
-apiVersion: v1
-kind: ServiceAccount
-metadata: {name: dex, namespace: okdev-system}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata: {name: okdev-dex}
-rules:
-  # storage.type=kubernetes:Dex 把授权码、刷新令牌等存成自己的 CRD,重启不丢登录态
-  - apiGroups: [dex.coreos.com]
-    resources: ["*"]
-    verbs: ["*"]
-  - apiGroups: [apiextensions.k8s.io]
-    resources: [customresourcedefinitions]
-    verbs: [create]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata: {name: okdev-dex}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: okdev-dex}
-subjects: [{kind: ServiceAccount, name: dex, namespace: okdev-system}]
----
+# Dex:以标准 OIDC 向 Headlamp 和 kube-apiserver 提供登录。账号存在 MySQL,用 dex-users 管理。
+# 配置在 Secret dex-config(含 MySQL 密码),由 scripts/deploy-dex.sh 生成,不入库。
+# TLS 证书在 Secret dex-tls(kube-apiserver 要求 issuer 是 https);管理接口的证书在 Secret dex-grpc-tls。
+# 存储用 MySQL,Dex 不需要访问 Kubernetes API,所以没有 RBAC。
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: dex, namespace: okdev-system}
@@ -32,7 +11,7 @@ spec:
   template:
     metadata: {labels: {app: dex}}
     spec:
-      serviceAccountName: dex
+      automountServiceAccountToken: false
       containers:
         - name: dex
           image: ghcr.io/dexidp/dex:v2.41.1
@@ -40,17 +19,20 @@ spec:
           env:
             - name: HEADLAMP_CLIENT_SECRET
               valueFrom: {secretKeyRef: {name: dex-client, key: headlamp-secret}}
-          ports: [{name: https, containerPort: 5556}]
+          ports: [{name: https, containerPort: 5556}, {name: grpc, containerPort: 5557}]
           readinessProbe: {httpGet: {path: /healthz, port: 5556, scheme: HTTPS}}
           volumeMounts:
             - {name: config, mountPath: /etc/dex, readOnly: true}
             - {name: tls, mountPath: /etc/dex/tls, readOnly: true}
+            - {name: grpc-tls, mountPath: /etc/dex/grpc, readOnly: true}
             - {name: login-page, mountPath: /srv/dex/web/templates/password.html, subPath: password.html, readOnly: true}
       volumes:
         - name: config
           secret: {secretName: dex-config}
         - name: tls
           secret: {secretName: dex-tls}
+        - name: grpc-tls
+          secret: {secretName: dex-grpc-tls}
         - name: login-page
           configMap: {name: dex-login-page}
 ---
@@ -59,4 +41,5 @@ kind: Service
 metadata: {name: dex, namespace: okdev-system}
 spec:
   selector: {app: dex}
-  ports: [{name: https, port: 5556, targetPort: 5556}]
+  # 5557 是管理接口,只在集群内可达,管理员用 kubectl port-forward 访问
+  ports: [{name: https, port: 5556, targetPort: 5556}, {name: grpc, port: 5557, targetPort: 5557}]

@@ -1,8 +1,21 @@
-# Dex 配置模板。scripts/deploy-dex.sh 把 ISSUER、REDIRECT_URI 替换进去,再拼上导出的 staticPasswords。
+# Dex 配置模板。scripts/deploy-dex.sh 把 __XXX__ 占位符替换成实际值,生成 Secret dex-config(含 MySQL 密码,不入库)。
 issuer: __ISSUER__
+# 账号(密码哈希)、令牌、签名密钥都存在 MySQL 里;账号用 dex-users 命令行管理,不用改配置、不用重启
 storage:
-  type: kubernetes
-  config: {inCluster: true}
+  type: mysql
+  config:
+    host: __MYSQL_HOST__
+    port: __MYSQL_PORT__
+    database: __MYSQL_DATABASE__
+    user: __MYSQL_USER__
+    password: __MYSQL_PASSWORD__
+    ssl: {mode: "__MYSQL_SSL_MODE__"}
+# 管理接口(创建/删除账号):必须双向 TLS,只有持有 tlsClientCA 签发的客户端证书的管理员能调用
+grpc:
+  addr: 0.0.0.0:5557
+  tlsCert: /etc/dex/grpc/tls.crt
+  tlsKey: /etc/dex/grpc/tls.key
+  tlsClientCA: /etc/dex/grpc/ca.crt
 web:
   https: 0.0.0.0:5556
   tlsCert: /etc/dex/tls/tls.crt

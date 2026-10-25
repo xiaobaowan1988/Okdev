@@ -1,0 +1,39 @@
+# 沙箱用:Dex 的 MySQL(单实例,数据放节点 hostPath,密码是测试值)。生产请用托管或主从 MySQL,并做备份。
+apiVersion: v1
+kind: Namespace
+metadata: {name: okdev-system}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: dex-mysql, namespace: okdev-system}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: dex-mysql}}
+  template:
+    metadata: {labels: {app: dex-mysql}}
+    spec:
+      containers:
+        - name: mysql
+          image: mirror.gcr.io/library/mysql:8.4
+          env:
+            - {name: MYSQL_ROOT_PASSWORD, value: test-only-root}
+            - {name: MYSQL_DATABASE, value: dex}
+            - {name: MYSQL_USER, value: dex}
+            - {name: MYSQL_PASSWORD, value: test-only-dex}
+          ports: [{containerPort: 3306}]
+          readinessProbe:
+            exec: {command: ["sh", "-c", "mysqladmin ping -uroot -ptest-only-root --silent"]}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts: [{name: data, mountPath: /var/lib/mysql}]
+      volumes:
+        - name: data
+          hostPath: {path: /var/lib/dex-mysql, type: DirectoryOrCreate}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: dex-mysql, namespace: okdev-system}
+spec:
+  selector: {app: dex-mysql}
+  ports: [{port: 3306}]
