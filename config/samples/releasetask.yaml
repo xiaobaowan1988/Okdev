@@ -1,0 +1,15 @@
+apiVersion: ci.okdev.io/v1
+kind: ReleaseTask
+metadata:
+  generateName: guestbook-
+  namespace: dev
+spec:
+  service: {name: guestbook-ui, kind: Deployment}
+  environment: dev
+  git:
+    repo: https://github.com/argoproj/argocd-example-apps
+    ref: master
+  gitops:
+    repo: https://github.com/example/gitops
+    branch: main
+    path: envs/dev/guestbook-ui

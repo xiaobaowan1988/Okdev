@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: okdev-controller
+  namespace: okdev-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: okdev-controller}
+  template:
+    metadata:
+      labels: {app: okdev-controller}
+    spec:
+      serviceAccountName: okdev-controller
+      containers:
+        - name: controller
+          image: okdev-controller:latest
+          args:
+            - --executor-image=$(EXECUTOR_IMAGE)
+            - --leader-elect
+          env:
+            - name: EXECUTOR_IMAGE
+              value: okdev-executor:latest   # 替换为真实的构建/部署执行器镜像
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
