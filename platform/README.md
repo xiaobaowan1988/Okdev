@@ -1,4 +1,7 @@
-# myk8s
+# platform(原 myk8s)
+
+> 这是 okdev 项目的底座层:集群、Argo CD、镜像仓库、deployer。上层的研发控制台(Headlamp 插件、`ReleaseTask` 控制器、登录)在仓库根目录。一次装起整套:`scripts/install-sandbox.sh`(在仓库根目录)。
+> 下面所有路径都相对 `platform/`,脚本可以从任意目录运行。
 
 用 kubeadm 在单机(Ubuntu 24.04)上安装 Kubernetes v1.37.1:containerd + flannel,单节点。
 
@@ -8,6 +11,16 @@ export KUBECONFIG=/etc/kubernetes/admin.conf
 export NO_PROXY=$NO_PROXY,<节点IP>   # 有 HTTPS 代理时,否则 kubectl 会超时
 kubectl get pods -A
 ```
+
+## 脚本一览(`scripts/`)
+| 脚本 | 作用 |
+|---|---|
+| `install.sh` / `restart-cluster.sh` | 装单节点集群 / 重启后拉起进程(无 systemd) |
+| `prepull-sandbox-images.sh` | 沙箱限流(429)时,把 Argo CD 的 redis 镜像从 mirror.gcr.io 拉下来并打成清单里的名字 |
+| `install-argocd.sh`、`deploy-apps.sh` | Argo CD、AppProject 和仓库登记 |
+| `deploy-mysql.sh`、`deploy-build.sh`、`build-deployer.sh` | deployer 的 MySQL、构建命名空间和镜像仓库、编译并导入 deployer |
+| `register-demo.sh` | 在 deployer 里登记演示数据(环境、服务、构建模板、构建器、流水线),可重复执行 |
+| `enable-oidc.sh` | 让 kube-apiserver 信任 Dex(OIDC);改静态 Pod 清单,可重复执行,会备份原清单 |
 
 ## 针对受限沙箱的处理
 - **无 systemd**:containerd、kubelet 手动后台启动(`scripts/run-kubelet.sh`),日志在 `/var/log`。

@@ -1,4 +1,4 @@
-# 沙箱单节点集群(myk8s)的覆盖:控制器镜像用 scripts/build-controller.sh 导入的本地镜像。deployer、registry、Argo CD 由 myk8s 提供。
+# 沙箱单节点集群(platform/)的覆盖:控制器镜像用 scripts/build-controller.sh 导入的本地镜像。deployer、registry、Argo CD 由 myk8s 提供。
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -12,7 +12,7 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/imagePullPolicy
         value: Never
-      # 沙箱出口 HTTPS 被中间人:控制器列仓库分支要信任它的 CA(ConfigMap build-ca 来自 myk8s 的 deploy-build.sh,复制到 okdev-system)
+      # 沙箱出口 HTTPS 被中间人:控制器列仓库分支要信任它的 CA(ConfigMap build-ca 来自 platform/scripts/deploy-build.sh,复制到 okdev-system)
       - op: add
         path: /spec/template/spec/containers/0/env
         value: [{name: SSL_CERT_FILE, value: /etc/ca/build-ca.crt}]

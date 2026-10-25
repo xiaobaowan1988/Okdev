@@ -43,7 +43,7 @@ func main() {
 		deployerToken string
 		gitTokenFile  string
 	)
-	flag.StringVar(&deployerURL, "deployer-url", "http://deployer.deployer.svc:8080", "deployer(myk8s)的地址")
+	flag.StringVar(&deployerURL, "deployer-url", "http://deployer.deployer.svc:8080", "deployer(platform/deployer)的地址")
 	flag.StringVar(&deployerToken, "deployer-token-file", "", "deployer 的 API_TOKEN 文件(deployer 开启鉴权时需要)")
 	flag.StringVar(&cfg.DefaultPipeline, "default-pipeline", "build-and-deploy", "spec.pipeline 留空时运行的流水线")
 	flag.DurationVar(&cfg.PollInterval, "poll-interval", 3*time.Second, "轮询 deployer 运行状态的间隔")

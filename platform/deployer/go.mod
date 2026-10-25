@@ -1,4 +1,4 @@
-module myk8s/deployer
+module github.com/xiaobaowan1988/okdev/platform/deployer
 
 go 1.24.0
 

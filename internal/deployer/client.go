@@ -1,4 +1,4 @@
-// Package deployer 是 myk8s deployer 的 HTTP 客户端:环境、服务、构建器、流水线运行都由它管。
+// Package deployer 是 platform/deployer 的 HTTP 客户端:环境、服务、构建器、流水线运行都由它管。
 package deployer
 
 import (

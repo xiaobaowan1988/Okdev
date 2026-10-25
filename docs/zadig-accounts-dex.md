@@ -76,7 +76,7 @@ dex-users delete alice
   离职要立刻断权的话,还要同时删掉 RBAC 绑定。
 - 管理员的客户端证书丢了或人员变动,要重新签发并换掉 `dex-grpc-tls` 里的 CA。
 
-## 沙箱实测(myk8s 集群;Zadig 真实建表脚本 + 模拟账号;Dex 用 MySQL 存储)
+## 沙箱实测(platform/ 集群;Zadig 真实建表脚本 + 模拟账号;Dex 用 MySQL 存储)
 | 场景 | 结果 |
 |---|---|
 | 导出 4 个本地账号 + 1 个 LDAP 账号 | 导出 6 个登录名(4 个账号);LDAP 账号不读;carol 无邮箱、dave 邮箱重复,只能用用户名登录 |

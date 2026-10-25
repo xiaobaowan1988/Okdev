@@ -38,7 +38,7 @@ func (p Phase) Terminal() bool { return p == PhaseSuccess || p == PhaseFailed }
 const StageSubmitting = "submitting"
 
 // ReleaseTask 描述一次"把某服务的某个分支/Tag 构建并发布到某环境"。
-// 构建和部署由 deployer(myk8s)执行,这里只是它的 K8s 原生入口:RBAC、kubectl 可查、Headlamp 统一界面。
+// 构建和部署由 deployer(platform/deployer)执行,这里只是它的 K8s 原生入口:RBAC、kubectl 可查、Headlamp 统一界面。
 type ReleaseTask struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

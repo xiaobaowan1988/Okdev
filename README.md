@@ -1,7 +1,8 @@
 # okdev
 
-研发控制台:Headlamp 插件 + `ReleaseTask` CRD 控制器 + 登录(Dex)。**构建、部署、环境、历史都由 [myk8s](../myk8s) 的 deployer 负责**,
-okdev 只是它面向开发的、K8s 原生的入口。
+一个项目,两层:
+- **`platform/`(原 myk8s 项目)**:集群安装、Argo CD、镜像仓库,以及 deployer——**构建、部署、环境、历史都由它负责**。见 [platform/README.md](platform/README.md)。
+- **其余(okdev 控制台)**:Headlamp 插件 + `ReleaseTask` CRD 控制器 + 登录(Dex)。它是 deployer 面向开发的、K8s 原生的入口。
 
 ```
 研发 ─> Headlamp(Environment / Workflow 两个页面)
@@ -15,9 +16,10 @@ okdev 只是它面向开发的、K8s 原生的入口。
 
 ## 为什么不自己部署
 十几个环境、几百个服务,"每个环境一个目录/一份清单"是几千份文件。deployer 的做法是:每个服务只有**一份**清单,
-"哪个服务部署到哪些环境、副本数、镜像"是 MySQL 里的几行数据。okdev 不重复这套,只做入口。
+"哪个服务部署到哪些环境、副本数、镜像"是 MySQL 里的几行数据。控制台不重复这套,只做入口。
 
 ## 布局
+- `platform/`:集群(kubeadm)、Argo CD、镜像仓库、deployer(独立的 Go 模块 `platform/deployer`)、`platform/scripts`(安装、`enable-oidc.sh`、`register-demo.sh`)。原 myk8s 仓库的历史保留在这个仓库里(旧路径,如 `git log -- deployer/pipeline.go`;原仓库是浅克隆,只带过来最近 50 个提交)。
 - `cmd/controller`、`internal/controller`:`ReleaseTask` 控制器。提交运行、轮询状态、写回 `status`、发 Events。
 - `internal/deployer`:deployer 的 HTTP 客户端。
 - `internal/gateway`:控制器给界面用的**只读**接口(环境、构建器、分支/Tag、环境里的服务、运行日志),只暴露界面需要的字段。
@@ -69,18 +71,14 @@ spec:
 - **操作人**:deployer 历史里的操作人是控制器(`--actor`),不是真人;真人在 `ReleaseTask` 的创建者和 K8s 审计日志里。
 - 控制器的只读接口读 deployer 用的是控制器自己的令牌,所以能访问该接口的人可以看到 deployer 里所有环境和服务,不受环境限制。
 
-## 运行(沙箱,myk8s 集群)
+## 运行(沙箱)
 ```bash
-cd ../myk8s
-sudo ./scripts/install.sh
-./scripts/install-argocd.sh && ./scripts/deploy-apps.sh && ./scripts/deploy-mysql.sh && ./scripts/deploy-build.sh
-./scripts/build-deployer.sh && kubectl apply -k manifests/deployer/app          # deployer + 构建/仓库
-# 在 deployer 里登记环境、服务、构建模板、构建器、流水线(见 myk8s/deployer/README.md)
-cd ../okdev
-./scripts/build-controller.sh && kubectl apply -k deploy/sandbox                  # 控制器
+scripts/install-sandbox.sh      # 集群 -> Argo CD -> deployer -> 演示数据 -> 控制器 -> Headlamp(token 登录),每步可重复执行
+scripts/sandbox-login.sh        # 可选:Dex 登录(Zadig 账号),需 STATIC_PASSWORDS=<导出文件> 或 ZADIG_SRC=<koderover/zadig 检出目录>
 kubectl create -f config/samples/releasetask.yaml
 kubectl -n okdev-releases get rt -w
 ```
+分步和说明:`platform/README.md`(集群、Argo CD、deployer)、`platform/deployer/README.md`(deployer 的 API 和构建配方)、`docs/`(登录)。
 `deploy/sandbox` 里的沙箱设置:控制器镜像用本地导入的,并信任沙箱出口网关的 CA(ConfigMap `build-ca` 复制到 `okdev-system`)。
 Headlamp:`scripts/deploy-headlamp.sh`(`HEADLAMP_OVERLAY` 选登录方式)。登录:默认粘贴 ServiceAccount token;Zadig 账号和 Google 登录见 docs。
 
@@ -89,7 +87,7 @@ Headlamp:`scripts/deploy-headlamp.sh`(`HEADLAMP_OVERLAY` 选登录方式)。登�
 
 ## 验证情况
 单元测试(`go test ./cmd/... ./internal/...`):状态映射、提交流程、不重复提交的各种情形、deployer 不可达、网关不泄露构建脚本、分支列表缓存。
-**沙箱端到端**(myk8s 集群 + deployer + Argo CD,Dex 登录,Playwright):
+**沙箱端到端**(platform 里的集群 + deployer + Argo CD,Dex 登录,Playwright):
 - Environment 页显示 deployer 里的服务和 Argo CD 状态,服务名跳到 `…/deployments/dev3-env-api/api`;
 - Workflow 页多选 `api` 和 `api-b`,下拉里是真实仓库的分支和 Tag,Run 后两个任务都 Success,集群里 `dev5-env-api`(2 副本)和 `dev5-env-api-b` 起来了;
 - 单服务运行进详情页:状态 Running→Success,Events(Submitted/Running/Succeeded),构建日志是 kaniko 的输出;
