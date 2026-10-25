@@ -73,7 +73,8 @@ kubectl create ns dev   # 并把 build-ca ConfigMap 复制进 dev(沙箱出口 H
 - 未验证:GitOps 走 HTTPS + token 推送(沙箱只测了 git:// 协议)、Kubernetes 在多副本选主切换下的行为、`spec.timeoutSeconds` 超时路径。
 
 ## Headlamp 插件(`headlamp-plugin/okdev-console`)
-- **`/services`(排障流)**:顶部环境(Namespace)下拉;四个 hook 并发订阅 Deployment / StatefulSet / CronJob / Job,合并成一张表,带"资源类型"列。服务名整页跳转到 Headlamp 原生详情页(`/c/<cluster>/{deployments|statefulsets|cronjobs|jobs}/<ns>/<name>`),Pod 列表、日志、终端都用原生功能。有 ownerReference 的 Job(CronJob 子任务、本项目的执行 Job)不列出。
+- **`/services`(侧边栏「环境」,排障流)**:顶部环境(Namespace)下拉;四个 hook 并发订阅 Deployment / StatefulSet / CronJob / Job,合并成一张表,带"资源类型"列。服务名整页跳转到 Headlamp 原生详情页(`/c/<cluster>/{deployments|statefulsets|cronjobs|jobs}/<ns>/<name>`),Pod 列表、日志、终端都用原生功能。有 ownerReference 的 Job(CronJob 子任务、本项目的执行 Job)不列出。
+- 侧边栏只保留「环境」和「工作流」两项,其余原生菜单通过 `registerSidebarEntryFilter` 隐藏(路由仍在,从环境页点进去仍可用原生详情、日志、终端)。
 - **`/workflows`(发布流)**:选环境、服务、Git 仓库与分支/Tag/Commit,可选 GitOps 设置,点"运行"经 Headlamp API 代理创建 `ReleaseTask`,然后跳转详情页。表单默认值可由工作负载注解预填:`okdev.io/git-repo`、`okdev.io/git-ref`、`okdev.io/gitops-repo`、`okdev.io/gitops-branch`、`okdev.io/gitops-path`。下方是该环境最近的任务列表。
 - **`/workflows/:namespace/:name`(任务详情)**:状态条(Pending → Running → Success/Failed)、失败原因、基本信息、按时间排序的 K8s Events 时间线、按步骤(checkout / prepare / build / release)分页的实时日志(`executorPodName` 出现后才加载,未开始的步骤显示"尚未开始";任务结束后停止 follow)。
   与设计文档的差异:路径多了 namespace,因为 `ReleaseTask` 是命名空间级资源。

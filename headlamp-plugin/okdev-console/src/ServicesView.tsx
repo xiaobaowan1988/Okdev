@@ -12,7 +12,7 @@ export function ServicesView() {
 
   return (
     <SectionBox
-      title="服务 (Services)"
+      title="环境 (Environment)"
       headerProps={{ actions: [<EnvironmentSelect key="env" value={env} onChange={setEnv} />] }}
     >
       {errors.length > 0 && (
