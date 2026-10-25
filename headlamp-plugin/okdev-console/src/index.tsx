@@ -51,3 +51,18 @@ registerRoute({
 });
 
 registerSidebarEntryFilter(entry => (entry.name.startsWith('okdev-') ? entry : null));
+
+// 侧边栏底部的 "Create"(新建任意资源的 YAML 编辑器)没有官方开关可关,
+// 这里用 MutationObserver 把侧边栏抽屉里的该按钮隐藏。只隐藏抽屉内的,
+// 原生详情页里的编辑/创建按钮不受影响。
+function hideSidebarCreateButton() {
+  const hide = () =>
+    document.querySelectorAll<HTMLButtonElement>('.MuiDrawer-root button').forEach(btn => {
+      if (btn.textContent?.trim() === 'Create' && btn.parentElement) {
+        btn.parentElement.style.display = 'none';
+      }
+    });
+  new MutationObserver(hide).observe(document.body, { childList: true, subtree: true });
+  hide();
+}
+hideSidebarCreateButton();

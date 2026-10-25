@@ -78,6 +78,7 @@ kubectl create ns dev   # 并把 build-ca ConfigMap 复制进 dev(沙箱出口 H
 - **`/workflows`(发布流)**:选环境、服务、Git 仓库与分支/Tag/Commit,可选 GitOps 设置,点"运行"经 Headlamp API 代理创建 `ReleaseTask`,然后跳转详情页。表单默认值可由工作负载注解预填:`okdev.io/git-repo`、`okdev.io/git-ref`、`okdev.io/gitops-repo`、`okdev.io/gitops-branch`、`okdev.io/gitops-path`。下方是该环境最近的任务列表。
 - **`/workflows/:namespace/:name`(任务详情)**:状态条(Pending → Running → Success/Failed)、失败原因、基本信息、按时间排序的 K8s Events 时间线、按步骤(checkout / prepare / build / release)分页的实时日志(`executorPodName` 出现后才加载,未开始的步骤显示"尚未开始";任务结束后停止 follow)。
   与设计文档的差异:路径多了 namespace,因为 `ReleaseTask` 是命名空间级资源。
+- 侧边栏底部的 "Create" 按钮也隐藏了(无官方开关,用 `MutationObserver` 只隐藏侧边栏抽屉里的那个,原生详情页里的按钮不受影响)。
 - 开发:`cd headlamp-plugin/okdev-console && npm install && npm run build|tsc|lint`。
 - 部署到集群:`scripts/deploy-headlamp.sh`(构建 → ConfigMap → 集群内 Headlamp),`kubectl -n okdev-system port-forward svc/headlamp 4466:80`,用 ServiceAccount token 登录。
 - 端到端脚本 `headlamp-plugin/e2e/`(Playwright,`TOKEN_FILE` 指向 token 文件):`node services.js`、`node workflows.js`。
