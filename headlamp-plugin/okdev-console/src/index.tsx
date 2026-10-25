@@ -20,7 +20,7 @@ registerSidebarEntry({
 registerSidebarEntry({
   parent: null,
   name: 'okdev-workflows',
-  label: 'Workflows',
+  label: 'Workflow',
   url: '/workflows',
   icon: 'mdi:rocket-launch',
 });
@@ -58,8 +58,11 @@ registerSidebarEntryFilter(entry => (entry.name.startsWith('okdev-') ? entry : n
 function hideSidebarCreateButton() {
   const hide = () =>
     document.querySelectorAll<HTMLButtonElement>('.MuiDrawer-root button').forEach(btn => {
+      // 展开时是带文字的 "Create" 按钮;侧边栏收起(窄屏)时变成只有图标、aria-label 为 "Create / Apply" 的按钮
       if (btn.textContent?.trim() === 'Create' && btn.parentElement) {
         btn.parentElement.style.display = 'none';
+      } else if (btn.getAttribute('aria-label')?.startsWith('Create')) {
+        btn.style.display = 'none';
       }
     });
   new MutationObserver(hide).observe(document.body, { childList: true, subtree: true });
