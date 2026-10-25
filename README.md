@@ -81,7 +81,7 @@ kubectl create ns dev   # 并把 build-ca ConfigMap 复制进 dev(沙箱出口 H
 - 部署到集群:`scripts/deploy-headlamp.sh`(构建 → ConfigMap → 集群内 Headlamp),`kubectl -n okdev-system port-forward svc/headlamp 4466:80`,用 ServiceAccount token 登录。
 - 端到端脚本 `headlamp-plugin/e2e/`(Playwright,`TOKEN_FILE` 指向 token 文件):`node services.js`、`node workflows.js`。
 
-插件在 myk8s 集群上用浏览器实测通过(Headlamp v0.4x 镜像 `ghcr.io/headlamp-k8s/headlamp:latest`,k8s v1.37.1):
+插件在 myk8s 集群上用浏览器实测通过(Headlamp 镜像 `ghcr.io/headlamp-k8s/headlamp:latest`,2026-10-25 拉取;k8s v1.37.1):
 - 服务页:切到 dev,列出 Deployment / StatefulSet / CronJob / Job 四类共 4 行,三类服务点击后分别落在对应原生路由。
 - 工作流页:选 hello 后仓库、ref、GitOps 目录由注解预填;运行后自动跳转详情页,状态条依次经过 Pending → Running → Success;Events 显示 JobCreated / Running / Succeeded;构建中能看到 kaniko 实时日志,结束后 release 日志显示 `pushed … to main`,GitOps 仓库确实多了对应 commit。
 - 失败路径:ref 填 `nope`,详情页显示 Failed 和 `container checkout exited with code 128: fatal: invalid reference: nope`。
