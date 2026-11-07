@@ -4,7 +4,7 @@
 构建、部署、环境、历史由 `platform/`(原 myk8s)里的 deployer 负责;这里负责登录、授权和对外的 API。
 
 ```
-okdev login ──浏览器里在 Dex 登录页输入 Zadig 账号──> ID Token(8 小时,自动续期)
+okdev login ──Zadig 用户名(或邮箱)+ 密码──> API 网关 /auth/login(失败 5 次锁定)──> Dex ──> ID Token(8 小时,自动续期)
      │
      ├─ Bearer ──> API 网关(验证令牌、授权、X-Actor=账号名)──> deployer(MySQL 存 环境×服务 的期望状态)──> Argo CD ──> 集群
      └─ kubectl ──────────────────────────────────────────────> kube-apiserver(信任同一个 Dex)──> RBAC
@@ -19,7 +19,7 @@ Dex:账号和令牌存在 MySQL;管理员用 dex-users(gRPC + 双向 TLS)增删�
 |---|---|
 | `platform/` | 原 myk8s:集群(kubeadm)、Argo CD、镜像仓库、deployer(独立 Go 模块)。见 [platform/README.md](platform/README.md)。原仓库历史保留(旧路径,如 `git log -- deployer/pipeline.go`;原仓库是浅克隆,只带过来最近 50 个提交) |
 | `cmd/api`、`internal/api` | API 网关:验证 Dex 令牌、开发者/管理员授权、转发到 deployer、敏感字段过滤、`/refs`、`/openapi.yaml` |
-| `cmd/okdev`、`internal/cliauth` | 命令行登录(设备授权流程)、取令牌、kubectl 凭证插件 |
+| `cmd/okdev`、`internal/cliauth` | 命令行:用户名密码登录(经网关)、取令牌、kubectl 凭证插件 |
 | `cmd/dex-users`、`internal/dexusers` | 管理员管理 Dex 里的账号(增、改密码、删、导入) |
 | `cmd/zadig-export`、`internal/zadigexport` | 把 Zadig 本地账号导出成 Dex 账号(bcrypt 哈希原样复制,原密码继续有效) |
 | `deploy/` | `api`(网关)、`dex`、`rbac`(Kubernetes 权限)、`*-sandbox`(沙箱覆盖) |
@@ -35,7 +35,7 @@ Dex:账号和令牌存在 MySQL;管理员用 dex-users(gRPC + 双向 TLS)增删�
 ```bash
 scripts/install-sandbox.sh            # 集群 -> Argo CD -> deployer -> 演示数据(环境 dev3/dev5,服务 api/api-b)
 ZADIG_SRC=<koderover/zadig 检出目录> scripts/sandbox-api.sh   # Dex + 让 apiserver 信任它 + 导入测试账号 + API 网关
-bin/okdev login --issuer https://<节点IP>:30556 --ca-file /tmp/okdev-dex-certs/ca.crt
+bin/okdev login --api http://<节点IP>:30080     # Zadig 用户名(或邮箱)和密码
 curl -H "Authorization: Bearer $(bin/okdev token)" http://<节点IP>:30080/v1/envs
 test/e2e/api.sh                       # 端到端验证
 ```
@@ -46,12 +46,13 @@ test/e2e/api.sh                       # 端到端验证
 构建脚本、Dockerfile、构建参数只给管理员。Kubernetes 权限单独由 RBAC 决定(默认只读;进容器执行命令是单独的 `okdev-debugger` 角色)。
 
 ## 验证情况
-单元测试(`go test ./cmd/... ./internal/...`):令牌验证(签名/过期/签发者/受众/缺 name)、授权矩阵、伪造 X-Actor、敏感字段过滤、识别服务不可达(503/502)、设备授权登录各种结果、令牌续期和并发续期、账号管理。
+单元测试(`go test ./cmd/... ./internal/...`):令牌验证(签名/过期/签发者/受众/缺 name)、授权矩阵、伪造 X-Actor、敏感字段过滤、识别服务不可达(503/502)、登录锁定(含大小写变体、按 IP、重启后宽限)、密码登录各种结果、令牌续期和并发续期、账号管理。
 **沙箱端到端 `test/e2e/api.sh`(全部通过)**:
-- 三个测试账号经设备授权流程登录(浏览器步骤由 Playwright 驱动),凭证文件权限 0600;
+- 三个测试账号用用户名密码登录(用户名或邮箱都行,身份相同),密码不落盘,凭证文件权限 0600,错误密码不留凭证;
+- 暴力破解防护:连续 5 次错误密码后,即使第六次密码正确也返回 429,期间不会去问 Dex;其他账号不受影响;直接调 HTTP 同样被锁;
 - 无令牌/乱令牌 401;开发者读、列分支、发布到 dev5/dev3,运行成功,`triggered_by` 是真实账号,伪造 `X-Actor` 无效;不存在的分支 → 失败并带原因;
 - 开发者创建构建器/环境、下线部署 → 403,看不到构建配方;管理员能;
 - 令牌过期自动续期;账号被删除后刷新令牌失效、无法续期;
 - 同一个令牌用 kubectl:alice(已授权)能读 Pod、身份是 `dex:alice`、不能读 Secret、不能进容器;bob(未授权)被拒绝但身份是 `dex:bob`。
-**没验证的**:ACK 等托管集群(见 deploy-ack.md);设备授权登录用的是 Dex 自带页面,没有测过 Dex 前面加 Ingress/反向代理;
+**没验证的**:ACK 等托管集群(见 deploy-ack.md);没有测过 Dex 前面加 Ingress、只对外开放发现文档和公钥的部署方式;
 网关多副本;几千个 Argo CD Application 的规模;deployer 开启 `API_TOKEN` 后网关带令牌访问(代码有,没实测)。

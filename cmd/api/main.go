@@ -28,6 +28,11 @@ func main() {
 		deployerTok  = flag.String("deployer-token-file", "", "deployer 的 API_TOKEN 文件(deployer 开启鉴权时必填)")
 		admins       = flag.String("admins", "", "管理员的 Zadig 账号名,逗号分隔;其余登录用户都是开发者(能发布到任何环境)")
 		gitTokenFile = flag.String("git-token-file", "", "列分支访问私有 http(s) 仓库用的 token 文件(可选)")
+		dexTokenURL  = flag.String("dex-token-url", "", "Dex 令牌接口的地址;留空取发现文档里的 token_endpoint。Dex 对外只开放发现文档和公钥时,指到集群内地址")
+		maxFails     = flag.Int("login-max-failures", 5, "同一个用户名(或来源 IP)在窗口内登录失败这么多次就锁定")
+		failWindow   = flag.Duration("login-failure-window", 15*time.Minute, "统计登录失败的时间窗口")
+		lockFor      = flag.Duration("login-lock", 5*time.Minute, "锁定时长")
+		clientIPHdr  = flag.String("client-ip-header", "", "可信反向代理设置的来源 IP 请求头(如 X-Forwarded-For);设置后还会按来源 IP 限制(防止对多个账号试密码)。不要在没有反向代理时设置,否则客户端可以伪造")
 	)
 	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -53,6 +58,10 @@ func main() {
 		Builders: deployer.New(*deployerURL, token),
 		Refs:     gitrefs.NewLister(readTrim(log, *gitTokenFile)),
 		Log:      log,
+
+		Tokens:         &api.DexTokens{ClientID: *audience, URL: *dexTokenURL, Verifier: verifier},
+		Throttle:       api.NewThrottle(*maxFails, *failWindow, *lockFor),
+		ClientIPHeader: *clientIPHdr,
 	}
 	srv := &http.Server{Addr: *listen, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
 

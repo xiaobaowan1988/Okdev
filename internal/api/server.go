@@ -39,6 +39,11 @@ type Server struct {
 	Builders      Builders
 	Refs          Refs
 	Log           *slog.Logger
+
+	// 登录入口(POST /auth/login、/auth/refresh):网关代理 Dex 的令牌接口,并限制失败次数。
+	Tokens         TokenSource
+	Throttle       *Throttle
+	ClientIPHeader string // 可信反向代理设置的来源 IP 请求头(如 X-Forwarded-For);空则不按 IP 限制
 }
 
 const maxBody = 1 << 20
@@ -93,6 +98,19 @@ func (s *Server) Handler() http.Handler {
 		case "/openapi.yaml":
 			sw.Header().Set("Content-Type", "application/yaml")
 			_, _ = sw.Write(openapiYAML)
+			return
+		}
+
+		if r.URL.Path == "/auth/login" || r.URL.Path == "/auth/refresh" {
+			if r.Method != http.MethodPost {
+				writeErr(sw, http.StatusMethodNotAllowed, "use POST")
+				return
+			}
+			if r.URL.Path == "/auth/login" {
+				s.login(sw, r)
+			} else {
+				s.refresh(sw, r)
+			}
 			return
 		}
 

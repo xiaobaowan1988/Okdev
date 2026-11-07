@@ -4,7 +4,7 @@ Zadig 账号一次性导出后,Zadig 下线,**Dex 成为账号的唯一来源**�
 管理员用命令行 `dex-users` 增、改、删账号,不用改配置、不用重启 Dex。
 
 ```
-okdev login(浏览器里在 Dex 登录页输入 Zadig 账号,设备授权流程)
+okdev login(Zadig 用户名或邮箱 + 密码)──> API 网关 /auth/login(失败锁定)──> Dex 的密码模式
         │ ID Token(受众 = okdev,有效期 8 小时,刷新令牌自动续期)
         ├──> API 网关 ──验证令牌、授权、X-Actor=账号名──> deployer
         └──> kube-apiserver(信任同一个 Dex)──> RBAC
@@ -45,7 +45,7 @@ scripts/deploy-dex.sh
 - **MySQL**:账号只在这里,Zadig 下线后没有第二份。**必须做定期备份并演练恢复**;生产用托管或主从 MySQL(沙箱的单实例在 `deploy/dex-sandbox/mysql.yaml`)。
 - **管理接口(gRPC,端口 5557)**:能创建任意账号,等于后门,所以要求双向 TLS——只有 `GRPC_CLIENT_CA` 签发的客户端证书能调用。
   这个 CA 应该专用于管理员,证书只发给管理员;Service 只在集群内可达,管理员用 `kubectl port-forward` 访问。
-- ID Token 有效期 8 小时(`deploy/dex/config.tmpl.yaml`)。Dex 里只有一个客户端 `okdev`(公开客户端,用设备授权流程),不开放"账号密码直接换令牌"。
+- ID Token 有效期 8 小时(`deploy/dex/config.tmpl.yaml`)。Dex 里只有一个客户端 `okdev`(公开客户端),令牌接口只开放密码模式和刷新令牌。**Dex 对密码登录没有失败次数限制**(实测 60 次错误密码照单全收),所以用户不能直接访问 Dex 的令牌接口,要经网关的 `/auth/login`(带锁定),见 [api-and-cli.md](api-and-cli.md)。
 - 沙箱证书脚本:`test/zadig/gen-certs.sh`(自签,仅测试)。
 
 ## 接入 Kubernetes 和 API 网关
@@ -84,7 +84,7 @@ dex-users delete alice
 | 导出 4 个本地账号 + 1 个 LDAP 账号 | 导出 6 个登录名(4 个账号);LDAP 账号不读;carol 无邮箱、dave 邮箱重复,只能用用户名登录 |
 | `dex-users import`,再导入一次 | 第一次 6 个创建;第二次 6 个更新,没有重复 |
 | alice 用用户名/邮箱/大写用户名登录 | 都成功,K8s 里都是 `dex:alice` |
-| `okdev login`(设备授权流程,浏览器里用 Zadig 账号登录) | 拿到 ID Token 和刷新令牌;令牌同时被 API 网关和 kube-apiserver 接受(完整端到端见 `test/e2e/api.sh`) |
+| `okdev login`(用户名或邮箱 + 密码,经网关) | 拿到 ID Token 和刷新令牌;令牌同时被 API 网关和 kube-apiserver 接受(完整端到端见 `test/e2e/api.sh`) |
 | 输错密码、LDAP 账号、carol 用邮箱 | 都被拒绝 |
 | `add frank` → 登录;`passwd` → 旧密码失败、新密码成功;`delete` → 立即不能登录 | 全部即时生效,**没有重启 Dex** |
 | 带 `offline_access` 取得刷新令牌,再 `passwd` / `delete` | 刷新令牌被撤销(对照:不操作时刷新成功) |
@@ -95,7 +95,7 @@ dex-users delete alice
 ## 局限
 - **没有用户组**:Dex 的密码库没有组字段,只能按用户名逐个写 RBAC。
 - **没有自助改密码**:只能管理员重置。
-- **Dex 对密码库账号有没有登录失败次数限制,我没有测过**,不要假定有。可以在 Dex 前面的 Ingress 上做限流。
+- **Dex 对密码库账号没有登录失败次数限制**(实测 60 次错误密码照单全收,账号不会被锁):用户不能直接访问 Dex 的令牌接口,要经网关的 `/auth/login`(失败 5 次锁定),见 [api-and-cli.md](api-and-cli.md)。
 - 用户名就是 K8s 里的身份,改名等于换人,RBAC 要跟着改。
 - 沙箱用自签证书和 NodePort;生产要正式域名和证书、Dex 前面的 Ingress。
 - `dex-users` 用 gRPC v1.66:更新的 grpc-go(≥1.67)强制要求 ALPN,而 Dex 2.41 的管理接口不支持,会握手失败。升级 Dex 或 grpc 时要一起验证。

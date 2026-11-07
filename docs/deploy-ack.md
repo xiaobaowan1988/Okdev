@@ -10,6 +10,8 @@
 3. **镜像来源**:Argo CD、Dex、kaniko、构建模板里的 golang 等镜像来自 `ghcr.io`、`gcr.io`、`docker.io`,国内节点可能拉不下来,要同步到 ACR 并改地址(构建模板的镜像是数据,要一起改)。
 4. **代码仓库**:Argo CD、deployer 的构建 Job、网关列分支都要访问 Git 仓库;在 GitHub 的话国内节点可能慢或不通,可以用云效 Codeup / Gitee。
 5. **对外访问**:网关和 Dex 需要 https 域名(Ingress 或 ALB + 阿里云证书)。**国内域名要先备案**。deployer 不要对外暴露。
+   **Dex 对外只开放 `/.well-known/openid-configuration` 和 `/keys`**(API Server 和网关取公钥要用),令牌接口(`/token`)只给网关:网关用 `--dex-token-url` 指到集群内地址。
+   Dex 对密码登录没有失败次数限制,令牌接口一旦让用户直接访问,网关的登录锁定就被绕过了。
 6. 集群安装脚本(kubeadm 等)用不上,只用 `platform/manifests`;沙箱里为绕限制做的处理(无 systemd、cgroup v1、出口 CA)也都不需要。
 
 ## 让 API Server 信任 Dex(OIDC)

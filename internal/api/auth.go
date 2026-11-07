@@ -43,6 +43,7 @@ type OIDCVerifier struct {
 
 	mu       sync.Mutex
 	verifier *oidc.IDTokenVerifier
+	tokenURL string
 }
 
 func NewOIDCVerifier(issuer, audience, caFile string) (*OIDCVerifier, error) {
@@ -78,7 +79,18 @@ func (v *OIDCVerifier) get(ctx context.Context) (*oidc.IDTokenVerifier, error) {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
 	v.verifier = p.Verifier(&oidc.Config{ClientID: v.Audience})
+	v.tokenURL = p.Endpoint().TokenURL
 	return v.verifier, nil
+}
+
+// TokenEndpoint 返回 OIDC 发现文档里的令牌接口地址。
+func (v *OIDCVerifier) TokenEndpoint(ctx context.Context) (string, error) {
+	if _, err := v.get(ctx); err != nil {
+		return "", err
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.tokenURL, nil
 }
 
 func (v *OIDCVerifier) Verify(ctx context.Context, raw string) (Identity, error) {

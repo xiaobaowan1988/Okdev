@@ -69,7 +69,7 @@ cat <<MSG
 
 Done.
   API gateway:  http://$NODE_IP:30080   (GET /openapi.yaml describes it)
-  Log in:       $DIR/bin/okdev login --issuer $ISSUER --ca-file $CERTS/ca.crt     # opens a device-code login; use a Zadig account
+  Log in:       $DIR/bin/okdev login --api http://$NODE_IP:30080                    # Zadig username (or email) and password
   Call the API: curl -H "Authorization: Bearer \$(okdev token)" http://$NODE_IP:30080/v1/envs
   Test accounts: alice / alice-pass-1 (developer; also read access to Kubernetes), bob / bob-pass-2 (developer), carol / carol-pass-3 (administrator).
   Manage accounts: $CERTS/dex-users (keep the Dex admin certs in $CERTS).

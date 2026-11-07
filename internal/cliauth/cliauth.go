@@ -1,5 +1,5 @@
-// Package cliauth 是命令行登录:用 Dex 的设备授权流程(OAuth 2.0 Device Authorization Grant)拿到 ID Token 和刷新令牌,
-// 保存在本地,需要时自动续期。密码只在浏览器里的 Dex 登录页输入,命令行和 AI 拿不到。
+// Package cliauth 是命令行登录:用 Zadig 账号的用户名和密码向 API 网关换 ID Token 和刷新令牌(网关代理 Dex 并限制失败次数),
+// 保存在本地,需要时自动续期。密码只在登录那一刻发给网关,不保存;之后一直用令牌和刷新令牌。
 package cliauth
 
 import (
@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,8 +21,7 @@ import (
 
 // Credentials 是保存在本地的登录状态。
 type Credentials struct {
-	Issuer       string    `json:"issuer"`
-	ClientID     string    `json:"client_id"`
+	API          string    `json:"api"` // API 网关地址;登录和续期都走它
 	CAFile       string    `json:"ca_file,omitempty"`
 	IDToken      string    `json:"id_token"`
 	RefreshToken string    `json:"refresh_token,omitempty"`
@@ -33,15 +31,13 @@ type Credentials struct {
 // ErrLoginRequired 表示没有可用的登录状态,或续期失败,需要重新 `okdev login`。
 var ErrLoginRequired = errors.New("login required: run `okdev login`")
 
-// Client 做设备授权登录和续期。
+// Client 做密码登录和续期。
 type Client struct {
-	HTTP  *http.Client
-	Sleep func(time.Duration) // 测试里替换,避免真的等待
-	Now   func() time.Time
-	Out   io.Writer // 提示信息(网址、验证码)输出到这里
+	HTTP *http.Client
+	Now  func() time.Time
 }
 
-func NewClient(caFile string, out io.Writer) (*Client, error) {
+func NewClient(caFile string) (*Client, error) {
 	hc := &http.Client{Timeout: 30 * time.Second}
 	if caFile != "" {
 		pem, err := os.ReadFile(caFile)
@@ -57,129 +53,61 @@ func NewClient(caFile string, out io.Writer) (*Client, error) {
 		}
 		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
 	}
-	return &Client{HTTP: hc, Sleep: time.Sleep, Now: time.Now, Out: out}, nil
-}
-
-type discovery struct {
-	TokenEndpoint  string `json:"token_endpoint"`
-	DeviceEndpoint string `json:"device_authorization_endpoint"`
+	return &Client{HTTP: hc, Now: time.Now}, nil
 }
 
 type tokenResp struct {
 	IDToken      string `json:"id_token"`
 	RefreshToken string `json:"refresh_token"`
 	Error        string `json:"error"`
-	ErrorDesc    string `json:"error_description"`
 }
 
-func (c *Client) postForm(ctx context.Context, endpoint string, form url.Values, out any) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+// post 向网关发 JSON,返回状态码、响应里的令牌和错误信息、以及 Retry-After。
+func (c *Client) post(ctx context.Context, api, path string, body any) (int, tokenResp, string, error) {
+	var tr tokenResp
+	b, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(api, "/")+path, strings.NewReader(string(b)))
 	if err != nil {
-		return 0, err
+		return 0, tr, "", err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, tr, "", fmt.Errorf("cannot reach the API gateway: %w", err)
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err := json.Unmarshal(b, out); err != nil {
-		return resp.StatusCode, fmt.Errorf("unexpected response (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err := json.Unmarshal(data, &tr); err != nil {
+		return resp.StatusCode, tr, "", fmt.Errorf("unexpected response from the API gateway (%d): %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
-	return resp.StatusCode, nil
+	return resp.StatusCode, tr, resp.Header.Get("Retry-After"), nil
 }
 
-func (c *Client) discover(ctx context.Context, issuer string) (discovery, error) {
-	var d discovery
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(issuer, "/")+"/.well-known/openid-configuration", nil)
-	if err != nil {
-		return d, err
-	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return d, fmt.Errorf("cannot reach the identity provider: %w", err)
-	}
-	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil || d.TokenEndpoint == "" {
-		return d, fmt.Errorf("invalid discovery document from %s", issuer)
-	}
-	if d.DeviceEndpoint == "" {
-		return d, errors.New("the identity provider does not support the device authorization flow")
-	}
-	return d, nil
-}
-
-// Login 走设备授权流程:打印网址和验证码,等用户在浏览器里完成登录,返回凭证。
-func (c *Client) Login(ctx context.Context, issuer, clientID, caFile string) (*Credentials, error) {
-	d, err := c.discover(ctx, issuer)
+// Login 用用户名和密码登录。username 可以是 Zadig 用户名,也可以是邮箱。
+func (c *Client) Login(ctx context.Context, api, caFile, username, password string) (*Credentials, error) {
+	status, tr, retry, err := c.post(ctx, api, "/auth/login", map[string]string{"username": username, "password": password})
 	if err != nil {
 		return nil, err
 	}
-	var dev struct {
-		DeviceCode              string `json:"device_code"`
-		UserCode                string `json:"user_code"`
-		VerificationURI         string `json:"verification_uri"`
-		VerificationURIComplete string `json:"verification_uri_complete"`
-		ExpiresIn               int    `json:"expires_in"`
-		Interval                int    `json:"interval"`
-		Error                   string `json:"error"`
-		ErrorDesc               string `json:"error_description"`
+	switch {
+	case status == http.StatusUnauthorized:
+		return nil, errors.New("invalid username or password")
+	case status == http.StatusTooManyRequests:
+		return nil, fmt.Errorf("too many failed attempts; try again in %s seconds", orDefault(retry, "a few minutes"))
+	case status != http.StatusOK:
+		return nil, fmt.Errorf("login failed (%d): %s", status, tr.Error)
 	}
-	form := url.Values{"client_id": {clientID}, "scope": {"openid email profile offline_access"}}
-	if _, err := c.postForm(ctx, d.DeviceEndpoint, form, &dev); err != nil {
-		return nil, err
-	}
-	if dev.Error != "" || dev.DeviceCode == "" {
-		return nil, fmt.Errorf("device authorization failed: %s %s", dev.Error, dev.ErrorDesc)
-	}
-	link := dev.VerificationURIComplete
-	if link == "" {
-		link = dev.VerificationURI
-	}
-	fmt.Fprintf(c.Out, "Open this URL in a browser and log in with your Zadig account:\n\n  %s\n\n", link)
-	if dev.VerificationURIComplete == "" || dev.UserCode != "" {
-		fmt.Fprintf(c.Out, "If asked for a code, enter: %s\n\n", dev.UserCode)
-	}
-	fmt.Fprintln(c.Out, "Waiting for you to finish in the browser...")
-
-	interval := time.Duration(dev.Interval) * time.Second
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
-	deadline := c.Now().Add(time.Duration(dev.ExpiresIn) * time.Second)
-	if dev.ExpiresIn <= 0 {
-		deadline = c.Now().Add(10 * time.Minute)
-	}
-	for {
-		if c.Now().After(deadline) {
-			return nil, errors.New("the login code expired; run `okdev login` again")
-		}
-		c.Sleep(interval)
-		var tr tokenResp
-		_, err := c.postForm(ctx, d.TokenEndpoint, url.Values{
-			"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "device_code": {dev.DeviceCode}, "client_id": {clientID},
-		}, &tr)
-		if err != nil {
-			return nil, err
-		}
-		switch tr.Error {
-		case "":
-			return c.credsFrom(issuer, clientID, caFile, tr, "")
-		case "authorization_pending":
-		case "slow_down":
-			interval += 5 * time.Second
-		case "access_denied":
-			return nil, errors.New("login was denied in the browser")
-		case "expired_token":
-			return nil, errors.New("the login code expired; run `okdev login` again")
-		default:
-			return nil, fmt.Errorf("login failed: %s %s", tr.Error, tr.ErrorDesc)
-		}
-	}
+	return c.credsFrom(api, caFile, tr, "")
 }
 
-func (c *Client) credsFrom(issuer, clientID, caFile string, tr tokenResp, oldRefresh string) (*Credentials, error) {
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
+
+func (c *Client) credsFrom(api, caFile string, tr tokenResp, oldRefresh string) (*Credentials, error) {
 	exp, err := tokenExpiry(tr.IDToken)
 	if err != nil {
 		return nil, err
@@ -188,7 +116,7 @@ func (c *Client) credsFrom(issuer, clientID, caFile string, tr tokenResp, oldRef
 	if rt == "" {
 		rt = oldRefresh
 	}
-	return &Credentials{Issuer: issuer, ClientID: clientID, CAFile: caFile, IDToken: tr.IDToken, RefreshToken: rt, Expiry: exp}, nil
+	return &Credentials{API: api, CAFile: caFile, IDToken: tr.IDToken, RefreshToken: rt, Expiry: exp}, nil
 }
 
 // tokenExpiry 读 JWT 里的 exp。只是用来决定何时续期,不做验证(验证是服务端的事)。
@@ -215,18 +143,17 @@ func (c *Client) Refresh(ctx context.Context, cr *Credentials) (*Credentials, er
 	if cr.RefreshToken == "" {
 		return nil, ErrLoginRequired
 	}
-	d, err := c.discover(ctx, cr.Issuer)
+	status, tr, _, err := c.post(ctx, cr.API, "/auth/refresh", map[string]string{"refresh_token": cr.RefreshToken})
 	if err != nil {
 		return nil, err
 	}
-	var tr tokenResp
-	if _, err := c.postForm(ctx, d.TokenEndpoint, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {cr.RefreshToken}, "client_id": {cr.ClientID}}, &tr); err != nil {
-		return nil, err
+	switch {
+	case status == http.StatusUnauthorized:
+		return nil, fmt.Errorf("%w (the refresh token was revoked or expired)", ErrLoginRequired)
+	case status != http.StatusOK:
+		return nil, fmt.Errorf("token refresh failed (%d): %s", status, tr.Error)
 	}
-	if tr.Error != "" {
-		return nil, fmt.Errorf("%w (%s: %s)", ErrLoginRequired, tr.Error, tr.ErrorDesc)
-	}
-	return c.credsFrom(cr.Issuer, cr.ClientID, cr.CAFile, tr, cr.RefreshToken)
+	return c.credsFrom(cr.API, cr.CAFile, tr, cr.RefreshToken)
 }
 
 // DefaultPath 是凭证文件的默认位置。

@@ -21,9 +21,11 @@ web:
   tlsCert: /etc/dex/tls/tls.crt
   tlsKey: /etc/dex/tls/tls.key
 oauth2:
+  # 命令行用账号密码直接换令牌(OAuth 2.0 密码模式),再用刷新令牌续期。
+  # 令牌接口只开放这两种授权方式(不开放设备授权、授权码)。密码只在 okdev login 那一刻发给 Dex,不保存。
+  grantTypes: [password, refresh_token]
+  passwordConnector: local
   skipApprovalScreen: true
-  # 授权码流程(设备授权流程也走它)+ 刷新令牌;不开放"账号密码直接换令牌"的密码模式,密码只在浏览器里的 Dex 登录页输入
-  responseTypes: [code]
 # 不设置 dir 时 Dex 用内置模板;设置后才会读 /srv/dex/web,从而应用挂载进来的自定义 password.html
 frontend:
   dir: /srv/dex/web
@@ -31,7 +33,7 @@ enablePasswordDB: true
 expiry:
   idTokens: 8h          # ID Token 同时给 API 网关和 kube-apiserver 用,有效期决定令牌多久过期(命令行会用刷新令牌自动续期)
   refreshTokens: {validForIfNotUsed: 24h, absoluteLifetime: 168h}
-# 唯一的客户端:命令行 okdev 用设备授权流程登录(公开客户端,没有密钥)。
+# 唯一的客户端:命令行 okdev(公开客户端,没有密钥)。
 # 签发的 ID Token 的受众(aud)就是这个 id:API 网关的 --audience 和 kube-apiserver 的 --oidc-client-id 都要与它一致。
 staticClients:
   - id: okdev

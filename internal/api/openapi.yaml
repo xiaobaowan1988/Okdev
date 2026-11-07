@@ -5,9 +5,9 @@ info:
   description: |
     Build and deploy services to environments. This gateway sits in front of the deployer.
 
-    Authentication: every request except /healthz and /openapi.yaml needs `Authorization: Bearer <ID token>`.
-    Get one with `okdev login` (once; a browser step with your Zadig account) and `okdev token` (prints a valid token, refreshing it when needed).
-    The same token works for kubectl (see `okdev token --exec-credential`).
+    Authentication: every request except /healthz, /openapi.yaml and /auth/* needs `Authorization: Bearer <ID token>`.
+    Get one with `okdev login --api <this server>` (once; your Zadig username or email and password) and `okdev token` (prints a valid token, refreshing it when needed).
+    The same token works for kubectl (see `okdev token --exec-credential`). After 5 failed logins a username is locked for 5 minutes (429).
 
     Roles: any logged-in user is a developer — can read everything and release to ANY environment.
     Administrators can also manage environments, services, builders, templates and pipelines, and take deployments offline (403 otherwise).
@@ -25,6 +25,29 @@ servers:
 security:
   - bearer: []
 paths:
+  /auth/login:
+    post:
+      summary: Log in with a Zadig username or email and password; returns an ID token (8 hours) and a refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [username, password], properties: {username: {type: string}, password: {type: string}}}
+      responses:
+        "200": {description: "{id_token, refresh_token}"}
+        "401": {description: invalid username or password}
+        "429": {description: too many failed attempts; see Retry-After}
+  /auth/refresh:
+    post:
+      summary: Exchange a refresh token for a new ID token (refresh tokens rotate; store the new one)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [refresh_token], properties: {refresh_token: {type: string}}}
+      responses: {"200": {description: "{id_token, refresh_token}"}, "401": {description: invalid or revoked; log in again}}
   /healthz:
     get: {summary: Liveness, security: [], responses: {"200": {description: ok}}}
   /v1/envs:
