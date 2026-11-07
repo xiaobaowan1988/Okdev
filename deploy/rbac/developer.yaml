@@ -1,0 +1,22 @@
+# Kubernetes 权限(用 okdev login 的令牌 + kubectl 访问 kube-apiserver 时用)。API 网关的权限是网关自己的(开发者/管理员),和这里无关。
+#
+# 研发人员一般绑:内置 view(只读工作负载、Pod、日志、事件,不含 Secret)+ okdev-developer(能列出命名空间)。
+# 进容器执行命令(pods/exec)单独放在 okdev-debugger 里,需要时再给:它等于在容器里开一个 shell,给 AI 用要慎重。
+# 绑定示例见 deploy/dex-sandbox/developers.yaml;用户名是 API Server 的 --oidc-username-prefix("dex:") + Zadig 账号名。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: okdev-developer
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: okdev-debugger
+rules:
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]

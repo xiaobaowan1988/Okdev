@@ -1,0 +1,121 @@
+openapi: 3.0.3
+info:
+  title: okdev API
+  version: "1"
+  description: |
+    Build and deploy services to environments. This gateway sits in front of the deployer.
+
+    Authentication: every request except /healthz and /openapi.yaml needs `Authorization: Bearer <ID token>`.
+    Get one with `okdev login` (once; a browser step with your Zadig account) and `okdev token` (prints a valid token, refreshing it when needed).
+    The same token works for kubectl (see `okdev token --exec-credential`).
+
+    Roles: any logged-in user is a developer — can read everything and release to ANY environment.
+    Administrators can also manage environments, services, builders, templates and pipelines, and take deployments offline (403 otherwise).
+    Build scripts / Dockerfiles / build args are only visible to administrators.
+
+    Typical flow for "release service X to environment E":
+    1. GET /v1/builders?service=X          (pick the builder)
+    2. GET /refs?builder=NAME              (pick a branch or tag)
+    3. POST /v1/pipelines/build-and-deploy/runs {"builder","env","ref"}   -> 202 with the run
+    4. GET /v1/runs/{id} until status is succeeded / failed / cancelled   (pending -> building -> deploying -> succeeded)
+    5. GET /v1/runs/{id}/log               (build log; on failure the run's `message` already says which step failed)
+    Runs of the same (environment, service) are queued and executed in submission order. Cancelling does not roll back what was already deployed.
+servers:
+  - url: https://api.example.com
+security:
+  - bearer: []
+paths:
+  /healthz:
+    get: {summary: Liveness, security: [], responses: {"200": {description: ok}}}
+  /v1/envs:
+    get: {summary: List environment names, responses: {"200": {description: "[\"dev3\", \"dev5\"]"}}}
+    post: {summary: "Create an environment (admin). Body {name}; name <= 20 chars, [a-z0-9-]", responses: {"201": {description: created}}}
+  /v1/envs/{env}:
+    delete: {summary: "Delete an environment (admin); 409 while it still has deployments", parameters: [{$ref: "#/components/parameters/env"}], responses: {"204": {description: deleted}}}
+  /v1/envs/{env}/services:
+    get:
+      summary: Services deployed in an environment, with desired and observed state (observed_sync / observed_health come from Argo CD)
+      parameters: [{$ref: "#/components/parameters/env"}]
+      responses: {"200": {description: list}}
+  /v1/envs/{env}/services/{svc}:
+    put:
+      summary: Deploy or update a service in an environment (idempotent). Body {replicas?, image?, expected_version?}
+      parameters: [{$ref: "#/components/parameters/env"}, {$ref: "#/components/parameters/svc"}]
+      responses: {"200": {description: updated}, "409": {description: version conflict, re-read and retry}}
+    delete: {summary: Take a deployment offline (admin), parameters: [{$ref: "#/components/parameters/env"}, {$ref: "#/components/parameters/svc"}], responses: {"204": {description: removed}}}
+  /v1/envs/{env}/services/{svc}/scale:
+    post:
+      summary: Change the replica count (0..50); the deployment must exist. Body {replicas, expected_version?}
+      parameters: [{$ref: "#/components/parameters/env"}, {$ref: "#/components/parameters/svc"}]
+      responses: {"200": {description: scaled}}
+  /v1/envs/{env}/services/{svc}/history:
+    get:
+      summary: Change history of a deployment (who changed what; the actor is the Zadig account name)
+      parameters: [{$ref: "#/components/parameters/env"}, {$ref: "#/components/parameters/svc"}]
+      responses: {"200": {description: list}}
+  /v1/services:
+    get: {summary: List registered services, responses: {"200": {description: list}}}
+    post: {summary: "Register a service (admin). Body {name, repo_url, path, revision?, workload?, image_name?}", responses: {"201": {description: created}}}
+  /v1/services/{name}:
+    put: {summary: Update a service definition (admin), parameters: [{name: name, in: path, required: true, schema: {type: string}}], responses: {"200": {description: updated}}}
+    delete: {summary: Delete a service (admin), parameters: [{name: name, in: path, required: true, schema: {type: string}}], responses: {"204": {description: deleted}}}
+  /v1/builders:
+    get:
+      summary: List builders (how to build a service's image). Each belongs to one service.
+      parameters: [{name: service, in: query, schema: {type: string}}]
+      responses: {"200": {description: list}}
+    post: {summary: Create a builder (admin), responses: {"201": {description: created}}}
+  /v1/builders/{name}:
+    get: {summary: Get a builder, parameters: [{name: name, in: path, required: true, schema: {type: string}}], responses: {"200": {description: builder}}}
+  /v1/templates:
+    get: {summary: List build templates, responses: {"200": {description: list}}}
+    post: {summary: Create a build template (admin), responses: {"201": {description: created}}}
+  /v1/pipelines:
+    get: {summary: List pipelines, responses: {"200": {description: list}}}
+    post: {summary: Create a pipeline (admin), responses: {"201": {description: created}}}
+  /v1/pipelines/{name}/runs:
+    post:
+      summary: Run a pipeline — build the builder's image from a branch/tag and deploy it to the environment
+      description: Body {builder, env, ref?, replicas?}. `ref` defaults to the builder's default; `replicas` only matters when the service is not yet deployed in that environment.
+      parameters: [{name: name, in: path, required: true, schema: {type: string, example: build-and-deploy}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [builder, env]
+              properties:
+                builder: {type: string}
+                env: {type: string}
+                ref: {type: string}
+                replicas: {type: integer, minimum: 0, maximum: 50}
+      responses: {"202": {description: queued; the body is the run}, "400": {description: invalid request}, "404": {description: builder, env or pipeline not found}}
+  /v1/runs:
+    get:
+      summary: List runs
+      parameters:
+        - {name: pipeline, in: query, schema: {type: string}}
+        - {name: builder, in: query, schema: {type: string}}
+        - {name: env, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string, enum: [pending, building, deploying, succeeded, failed, cancelled]}}
+        - {name: limit, in: query, schema: {type: integer}}
+      responses: {"200": {description: list}}
+  /v1/runs/{id}:
+    get: {summary: Get a run (status, image, message, triggered_by), parameters: [{$ref: "#/components/parameters/id"}], responses: {"200": {description: run}}}
+  /v1/runs/{id}/log:
+    get: {summary: Build log as plain text (live while building, saved afterwards), parameters: [{$ref: "#/components/parameters/id"}], responses: {"200": {description: text/plain}}}
+  /v1/runs/{id}/cancel:
+    post: {summary: Cancel a run (409 if already finished); already deployed changes are not rolled back, parameters: [{$ref: "#/components/parameters/id"}], responses: {"200": {description: cancelled}}}
+  /refs:
+    get:
+      summary: Branches and tags of a builder's repository (for choosing `ref`)
+      parameters: [{name: builder, in: query, required: true, schema: {type: string}}]
+      responses: {"200": {description: "{branches, tags, default, builder_ref}"}}
+components:
+  securitySchemes:
+    bearer: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    env: {name: env, in: path, required: true, schema: {type: string}}
+    svc: {name: svc, in: path, required: true, schema: {type: string}}
+    id: {name: id, in: path, required: true, schema: {type: integer}}

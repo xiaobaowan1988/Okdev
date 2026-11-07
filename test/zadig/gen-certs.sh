@@ -4,7 +4,7 @@
 # 生产环境:管理员客户端证书应由单独的 CA 签发(只有这个 CA 签发的证书能调用管理接口),并只发给管理员。
 set -euo pipefail
 out=$1; ip=$2; mkdir -p "$out"; cd "$out"
-# 已有 CA 就复用(kube-apiserver 和 Headlamp 已经信任它)
+# 已有 CA 就复用(kube-apiserver 已经信任它)
 [ -f ca.crt ] && [ -f ca.key ] || openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=okdev-dex-test-ca" -keyout ca.key -out ca.crt 2>/dev/null
 sign() { # sign <name> <CN> <san> <eku>
   openssl req -newkey rsa:2048 -nodes -subj "/CN=$2" -keyout "$1.key" -out "$1.csr" 2>/dev/null

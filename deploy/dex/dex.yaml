@@ -1,4 +1,4 @@
-# Dex:以标准 OIDC 向 Headlamp 和 kube-apiserver 提供登录。账号存在 MySQL,用 dex-users 管理。
+# Dex:以标准 OIDC 向 API 网关和 kube-apiserver 提供登录。账号存在 MySQL,用 dex-users 管理。
 # 配置在 Secret dex-config(含 MySQL 密码),由 scripts/deploy-dex.sh 生成,不入库。
 # TLS 证书在 Secret dex-tls(kube-apiserver 要求 issuer 是 https);管理接口的证书在 Secret dex-grpc-tls。
 # 存储用 MySQL,Dex 不需要访问 Kubernetes API,所以没有 RBAC。
@@ -16,9 +16,6 @@ spec:
         - name: dex
           image: ghcr.io/dexidp/dex:v2.41.1
           args: [dex, serve, /etc/dex/config.yaml]
-          env:
-            - name: HEADLAMP_CLIENT_SECRET
-              valueFrom: {secretKeyRef: {name: dex-client, key: headlamp-secret}}
           ports: [{name: https, containerPort: 5556}, {name: grpc, containerPort: 5557}]
           readinessProbe: {httpGet: {path: /healthz, port: 5556, scheme: HTTPS}}
           volumeMounts:

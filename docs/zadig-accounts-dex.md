@@ -1,12 +1,14 @@
 # 用原来的 Zadig 账号登录(账号迁到 Dex + MySQL)
 
-Zadig 账号一次性导出后,Zadig 下线,**Dex 成为账号的唯一来源**。开发继续用 Zadig 的用户名(或邮箱)和原密码登录 Headlamp 和 Kubernetes;
+Zadig 账号一次性导出后,Zadig 下线,**Dex 成为账号的唯一来源**。开发继续用 Zadig 的用户名(或邮箱)和原密码登录,用同一个令牌访问 API 网关和 Kubernetes;
 管理员用命令行 `dex-users` 增、改、删账号,不用改配置、不用重启 Dex。
 
 ```
-浏览器 ─> Headlamp ─> Dex(登录页) ─ID Token─> Headlamp ─Bearer─> kube-apiserver ─> RBAC
-                       │  账号、令牌、签名密钥都存在 MySQL
-                       └─ gRPC 管理接口(双向 TLS) <── dex-users(管理员)
+okdev login(浏览器里在 Dex 登录页输入 Zadig 账号,设备授权流程)
+        │ ID Token(受众 = okdev,有效期 8 小时,刷新令牌自动续期)
+        ├──> API 网关 ──验证令牌、授权、X-Actor=账号名──> deployer
+        └──> kube-apiserver(信任同一个 Dex)──> RBAC
+          账号、令牌、签名密钥都存在 MySQL;gRPC 管理接口(双向 TLS) <── dex-users(管理员)
 一次性迁移:Zadig MySQL ── zadig-export ──> static-passwords.yaml ── dex-users import ──> Dex
 ```
 
@@ -34,7 +36,7 @@ Zadig 和 Dex 用的都是 bcrypt,哈希可以原样复制,开发的密码不用
 
 ## 部署 Dex
 ```bash
-ISSUER=https://dex.example.com REDIRECT_URI=https://headlamp.example.com/oidc-callback \
+ISSUER=https://dex.example.com \
 TLS_CERT=tls.crt TLS_KEY=tls.key \
 GRPC_CERT=grpc.crt GRPC_KEY=grpc.key GRPC_CLIENT_CA=admin-ca.crt \
 MYSQL_HOST=mysql.example.com MYSQL_USER=dex MYSQL_PASSWORD=... MYSQL_SSL_MODE=true \
@@ -43,14 +45,14 @@ scripts/deploy-dex.sh
 - **MySQL**:账号只在这里,Zadig 下线后没有第二份。**必须做定期备份并演练恢复**;生产用托管或主从 MySQL(沙箱的单实例在 `deploy/dex-sandbox/mysql.yaml`)。
 - **管理接口(gRPC,端口 5557)**:能创建任意账号,等于后门,所以要求双向 TLS——只有 `GRPC_CLIENT_CA` 签发的客户端证书能调用。
   这个 CA 应该专用于管理员,证书只发给管理员;Service 只在集群内可达,管理员用 `kubectl port-forward` 访问。
-- ID Token 有效期 8 小时(`deploy/dex/config.tmpl.yaml`)。
+- ID Token 有效期 8 小时(`deploy/dex/config.tmpl.yaml`)。Dex 里只有一个客户端 `okdev`(公开客户端,用设备授权流程),不开放"账号密码直接换令牌"。
 - 沙箱证书脚本:`test/zadig/gen-certs.sh`(自签,仅测试)。
 
-## 接入 Kubernetes 和 Headlamp
+## 接入 Kubernetes 和 API 网关
 1. **kube-apiserver 信任 Dex**(自建集群要改控制面配置并重启 apiserver;托管集群用各自的 OIDC 配置入口):
    ```
    --oidc-issuer-url=https://dex.example.com
-   --oidc-client-id=headlamp
+   --oidc-client-id=okdev
    --oidc-username-claim=name
    --oidc-username-prefix=dex:
    --oidc-ca-file=<Dex 证书的 CA,公共 CA 签发则不需要>
@@ -60,9 +62,8 @@ scripts/deploy-dex.sh
      kubelet 会拒绝整个清单,apiserver 起不来。
    - **Dex 的签名密钥换了之后(例如存储换成新的库),apiserver 会一直用缓存的旧公钥,所有人 401**,要重启 kube-apiserver。
      正常的密钥轮换不受影响(旧公钥会继续发布一段时间)。
-2. **Headlamp**:改 `deploy/headlamp-dex/kustomization.yaml` 里的 issuer、callback-url,把 Dex 的 CA 放进 ConfigMap `dex-ca`,
-   `HEADLAMP_OVERLAY=deploy/headlamp-dex scripts/deploy-headlamp.sh`。
-3. **授权**:登录只证明身份,权限由 RBAC 决定。K8s 用户名是 `dex:` + **账号名**(例如 `dex:alice`);需要绑哪些角色见 README 的“权限”一节,示例见 `deploy/dex-sandbox/developers.yaml`。
+2. **API 网关**:`--issuer-url` 和 `--audience`(= `okdev`)要与上面一致,见 [docs/api-and-cli.md](api-and-cli.md)。
+3. **授权**:登录只证明身份。Kubernetes 的权限由 RBAC 决定,用户名是 `dex:` + **账号名**(例如 `dex:alice`),角色和绑定示例见 `deploy/rbac/developer.yaml`、`deploy/dex-sandbox/developers.yaml`;API 网关的权限见 api-and-cli.md。
 
 ## 日常管理:`dex-users`
 ```bash
@@ -77,11 +78,13 @@ dex-users delete alice
 - 管理员的客户端证书丢了或人员变动,要重新签发并换掉 `dex-grpc-tls` 里的 CA。
 
 ## 沙箱实测(platform/ 集群;Zadig 真实建表脚本 + 模拟账号;Dex 用 MySQL 存储)
+登录、账号管理的各个场景;网关和 kubectl 的端到端见 [api-and-cli.md](api-and-cli.md) 和 `test/e2e/api.sh`。
 | 场景 | 结果 |
 |---|---|
 | 导出 4 个本地账号 + 1 个 LDAP 账号 | 导出 6 个登录名(4 个账号);LDAP 账号不读;carol 无邮箱、dave 邮箱重复,只能用用户名登录 |
 | `dex-users import`,再导入一次 | 第一次 6 个创建;第二次 6 个更新,没有重复 |
 | alice 用用户名/邮箱/大写用户名登录 | 都成功,K8s 里都是 `dex:alice` |
+| `okdev login`(设备授权流程,浏览器里用 Zadig 账号登录) | 拿到 ID Token 和刷新令牌;令牌同时被 API 网关和 kube-apiserver 接受(完整端到端见 `test/e2e/api.sh`) |
 | 输错密码、LDAP 账号、carol 用邮箱 | 都被拒绝 |
 | `add frank` → 登录;`passwd` → 旧密码失败、新密码成功;`delete` → 立即不能登录 | 全部即时生效,**没有重启 Dex** |
 | 带 `offline_access` 取得刷新令牌,再 `passwd` / `delete` | 刷新令牌被撤销(对照:不操作时刷新成功) |

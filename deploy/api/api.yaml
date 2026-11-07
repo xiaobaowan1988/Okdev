@@ -1,0 +1,41 @@
+# okdev API 网关:放在 deployer 前面。用 Zadig 账号(经 Dex 登录)访问;同一个令牌也能访问 kube-apiserver。
+# 它不访问 Kubernetes API,所以没有 RBAC,也不挂载 ServiceAccount 令牌。
+apiVersion: v1
+kind: Namespace
+metadata: {name: okdev-system}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: okdev-api, namespace: okdev-system}
+spec:
+  replicas: 2   # 无状态
+  selector: {matchLabels: {app: okdev-api}}
+  template:
+    metadata: {labels: {app: okdev-api}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: api
+          image: okdev-api:latest
+          args:
+            - --issuer-url=https://dex.example.com          # 与 kube-apiserver 的 --oidc-issuer-url 一致
+            - --audience=okdev                              # 与 Dex 客户端 ID、kube-apiserver 的 --oidc-client-id 一致
+            - --deployer-url=http://deployer.deployer.svc:8080
+            - --admins=                                     # 管理员的 Zadig 账号名,逗号分隔;其余登录用户都是开发者
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: okdev-api, namespace: okdev-system}
+spec:
+  selector: {app: okdev-api}
+  ports: [{name: http, port: 80, targetPort: 8080}]

@@ -1,0 +1,23 @@
+# 沙箱:镜像用本地导入的;issuer 是 Dex 的 NodePort 地址;信任 Dex 的自签 CA(ConfigMap dex-ca);
+# 用 NodePort 30080 暴露,宿主机上的 curl / okdev 直接访问 http://<节点IP>:30080。
+# 管理员设为 carol(沙箱测试账号),其余账号(alice、bob 等)是开发者。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [../api]
+patches:
+  - target: {kind: Deployment, name: okdev-api}
+    patch: |-
+      - {op: replace, path: /spec/replicas, value: 1}
+      - {op: replace, path: /spec/template/spec/containers/0/image, value: "okdev-api:dev"}
+      - {op: add, path: /spec/template/spec/containers/0/imagePullPolicy, value: Never}
+      - {op: replace, path: /spec/template/spec/containers/0/args/0, value: "--issuer-url=https://192.0.2.2:30556"}
+      - {op: replace, path: /spec/template/spec/containers/0/args/3, value: "--admins=carol"}
+      - {op: add, path: /spec/template/spec/containers/0/args/-, value: "--issuer-ca-file=/etc/dex-ca/ca.crt"}
+      # 沙箱出口 HTTPS 被中间人:列仓库分支(/refs)要信任它的 CA(ConfigMap build-ca 来自 platform/scripts/deploy-build.sh,复制到 okdev-system)
+      - {op: add, path: /spec/template/spec/containers/0/env, value: [{name: SSL_CERT_FILE, value: /etc/build-ca/build-ca.crt}]}
+      - {op: add, path: /spec/template/spec/containers/0/volumeMounts, value: [{name: dex-ca, mountPath: /etc/dex-ca, readOnly: true}, {name: build-ca, mountPath: /etc/build-ca, readOnly: true}]}
+      - {op: add, path: /spec/template/spec/volumes, value: [{name: dex-ca, configMap: {name: dex-ca}}, {name: build-ca, configMap: {name: build-ca, optional: true}}]}
+  - target: {kind: Service, name: okdev-api}
+    patch: |-
+      - {op: add, path: /spec/type, value: NodePort}
+      - {op: add, path: /spec/ports/0/nodePort, value: 30080}

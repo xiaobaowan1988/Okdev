@@ -1,11 +1,11 @@
 #!/bin/bash
 # 让 kube-apiserver 信任 Dex(OIDC)。kubeadm 单节点集群:改静态 Pod 清单,kubelet 自动重启 apiserver。
-# 用法: ISSUER=https://dex.example.com [CLIENT_ID=headlamp] [CA_FILE=dex-ca.crt] scripts/enable-oidc.sh
+# 用法: ISSUER=https://dex.example.com [CLIENT_ID=okdev] [CA_FILE=dex-ca.crt] scripts/enable-oidc.sh
 # 可重复执行:已配置则更新参数,没有变化就不动清单(不会重启 apiserver)。
 set -euo pipefail
 MANIFEST=${MANIFEST:-/etc/kubernetes/manifests/kube-apiserver.yaml}
 : "${ISSUER:?set ISSUER, e.g. https://dex.example.com}"
-CLIENT_ID=${CLIENT_ID:-headlamp}
+CLIENT_ID=${CLIENT_ID:-okdev}   # 必须与 Dex 客户端 ID 和 API 网关的 --audience 一致
 export KUBECONFIG=${KUBECONFIG:-/etc/kubernetes/admin.conf}
 
 CA_ARG=""
@@ -13,7 +13,12 @@ if [ -n "${CA_FILE:-}" ]; then
   install -m644 "$CA_FILE" /etc/kubernetes/pki/okdev-dex-ca.crt   # 清单里已经挂载了 /etc/kubernetes/pki
   CA_ARG="--oidc-ca-file=/etc/kubernetes/pki/okdev-dex-ca.crt"
 fi
-[ -f "$MANIFEST.pre-oidc" ] || cp "$MANIFEST" "$MANIFEST.pre-oidc"   # 备份放在清单目录外会更稳妥,这里与清单同目录但后缀不是 .yaml,kubelet 不会当成清单
+# 备份必须放在 kubelet 的静态 Pod 目录之外:kubelet 会把目录里的每个文件都当成静态 Pod 清单读,
+# 同名的备份会和正本抢同一个 Pod,apiserver 可能按旧内容(旧参数)重启。
+BACKUP_DIR=${BACKUP_DIR:-/var/backups/okdev}
+mkdir -p "$BACKUP_DIR"
+BACKUP=$BACKUP_DIR/$(basename "$MANIFEST").pre-oidc
+[ -f "$BACKUP" ] || cp "$MANIFEST" "$BACKUP"
 
 changed=$(python3 - "$MANIFEST" "$ISSUER" "$CLIENT_ID" "$CA_ARG" <<'PY'
 import sys
@@ -68,5 +73,5 @@ fi
 echo "manifest updated; waiting for kube-apiserver to restart..."
 sleep 20
 for _ in $(seq 1 60); do kubectl get nodes >/dev/null 2>&1 && { echo "kube-apiserver is back"; exit 0; }; sleep 4; done
-echo "kube-apiserver did not come back; restore with: cp $MANIFEST.pre-oidc $MANIFEST" >&2
+echo "kube-apiserver did not come back; restore with: cp $BACKUP $MANIFEST" >&2
 exit 1
